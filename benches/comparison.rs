@@ -4,7 +4,9 @@ use fractional_index::FractionalIndex;
 use std::{hint::black_box, time::Duration};
 
 const KEY_SIZES: [(&str, usize); 3] = [("short", 1), ("16_bytes", 16), ("64_bytes", 64)];
-const WORKLOAD_SIZES: [u64; 3] = [100, 1_000, 10_000];
+const WORKLOAD_SIZES: [u64; 10] = [
+    10_000, 20_000, 30_000, 40_000, 50_000, 60_000, 70_000, 80_000, 90_000, 100_000,
+];
 
 trait BenchIndex: Ord + Sized {
     fn initial() -> Self;
@@ -86,6 +88,22 @@ fn grow_after<T: BenchIndex>(target_len: usize) -> T {
     index
 }
 
+fn grow_fracindex_before(target_len: usize) -> Fracindex {
+    let mut index = Fracindex::default();
+    while index.to_bytes().len() < target_len {
+        index = Fracindex::new_before(&index, fracindex::FracindexPolicy::Random);
+    }
+    index
+}
+
+fn grow_fracindex_after(target_len: usize) -> Fracindex {
+    let mut index = Fracindex::default();
+    while index.to_bytes().len() < target_len {
+        index = Fracindex::new_after(&index, fracindex::FracindexPolicy::Random);
+    }
+    index
+}
+
 fn grow_between<T: BenchIndex>(target_len: usize) -> (T, T) {
     let left = T::initial();
     let mut right = T::new_after(&left);
@@ -140,7 +158,7 @@ fn benchmark_before(c: &mut Criterion) {
     let mut group = c.benchmark_group("operations/new_before");
 
     for (label, target_len) in KEY_SIZES {
-        let fracindex = grow_before::<Fracindex>(target_len);
+        let fracindex = grow_fracindex_before(target_len);
         let fractional_index = grow_before::<FractionalIndex>(target_len);
 
         group.bench_with_input(
@@ -169,7 +187,7 @@ fn benchmark_after(c: &mut Criterion) {
     let mut group = c.benchmark_group("operations/new_after");
 
     for (label, target_len) in KEY_SIZES {
-        let fracindex = grow_after::<Fracindex>(target_len);
+        let fracindex = grow_fracindex_after(target_len);
         let fractional_index = grow_after::<FractionalIndex>(target_len);
 
         group.bench_with_input(
