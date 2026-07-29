@@ -1,12 +1,14 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fracindex::Fracindex;
 use fractional_index::FractionalIndex;
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::{hint::black_box, time::Duration};
 
 const KEY_SIZES: [(&str, usize); 3] = [("short", 1), ("16_bytes", 16), ("64_bytes", 64)];
 const WORKLOAD_SIZES: [u64; 10] = [
     10_000, 20_000, 30_000, 40_000, 50_000, 60_000, 70_000, 80_000, 90_000, 100_000,
 ];
+const RANDOM_WORKLOAD_SEED: u64 = 0xF12A_C710_1D3E_5EED;
 
 trait BenchIndex: Ord + Sized {
     fn initial() -> Self;
@@ -14,6 +16,12 @@ trait BenchIndex: Ord + Sized {
     fn new_after(other: &Self) -> Self;
     fn new_between(left: &Self, right: &Self) -> Option<Self>;
     fn byte_len(&self) -> usize;
+    fn new_before_prefer_random(other: &Self) -> Self {
+        Self::new_before(other)
+    }
+    fn new_after_prefer_random(other: &Self) -> Self {
+        Self::new_after(other)
+    }
 }
 
 impl BenchIndex for Fracindex {
@@ -35,6 +43,14 @@ impl BenchIndex for Fracindex {
 
     fn byte_len(&self) -> usize {
         self.to_bytes().len()
+    }
+
+    fn new_before_prefer_random(other: &Self) -> Self {
+        Self::new_before(other, fracindex::FracindexPolicy::Random)
+    }
+
+    fn new_after_prefer_random(other: &Self) -> Self {
+        Self::new_after(other, fracindex::FracindexPolicy::Random)
     }
 }
 
@@ -141,6 +157,76 @@ fn dense_between_workload<T: BenchIndex>(count: u64) -> T {
     }
 
     right
+}
+
+type Gap = (Option<usize>, Option<usize>);
+
+struct RandomInsertWorkload<T> {
+    indexes: Vec<T>,
+    gaps: Vec<Gap>,
+}
+
+fn random_gap_choices(count: u64) -> Vec<usize> {
+    let count = usize::try_from(count).expect("workload size must fit in usize");
+    let mut rng = StdRng::seed_from_u64(RANDOM_WORKLOAD_SEED);
+
+    (0..count)
+        .map(|inserted| rng.random_range(0..inserted + 2))
+        .collect()
+}
+
+fn random_insert_workload<T: BenchIndex, const VALIDATE: bool>(
+    choices: &[usize],
+) -> RandomInsertWorkload<T> {
+    let mut indexes = Vec::with_capacity(choices.len() + 1);
+    indexes.push(T::initial());
+
+    let mut gaps = Vec::with_capacity(choices.len() + 2);
+    gaps.push((None, Some(0)));
+    gaps.push((Some(0), None));
+
+    for (iteration, &choice) in choices.iter().enumerate() {
+        let (left, right) = gaps[choice];
+        let index = match (left, right) {
+            (None, Some(right)) => T::new_before_prefer_random(&indexes[right]),
+            (Some(left), None) => T::new_after_prefer_random(&indexes[left]),
+            (Some(left), Some(right)) => T::new_between(&indexes[left], &indexes[right])
+                .expect("ordered gap bounds must have a midpoint"),
+            (None, None) => unreachable!("a gap must have at least one bound"),
+        };
+
+        if VALIDATE {
+            if let Some(left) = left {
+                assert!(indexes[left] < index, "iteration {iteration}, left bound");
+            }
+            if let Some(right) = right {
+                assert!(index < indexes[right], "iteration {iteration}, right bound");
+            }
+        }
+
+        let inserted = indexes.len();
+        indexes.push(index);
+        gaps[choice] = (left, Some(inserted));
+        gaps.push((Some(inserted), right));
+    }
+
+    RandomInsertWorkload { indexes, gaps }
+}
+
+fn validate_random_insert_workload<T: BenchIndex>() {
+    let random_choices = random_gap_choices(1_000);
+
+    for choices in [&[0][..], &[1][..], random_choices.as_slice()] {
+        let workload = random_insert_workload::<T, true>(choices);
+        assert_eq!(workload.indexes.len(), choices.len() + 1);
+        assert_eq!(workload.gaps.len(), choices.len() + 2);
+
+        for &(left, right) in &workload.gaps {
+            if let (Some(left), Some(right)) = (left, right) {
+                assert!(workload.indexes[left] < workload.indexes[right]);
+            }
+        }
+    }
 }
 
 fn benchmark_default(c: &mut Criterion) {
@@ -342,9 +428,44 @@ fn benchmark_dense_between(c: &mut Criterion) {
     group.finish();
 }
 
+fn benchmark_random_insert(c: &mut Criterion) {
+    let mut group = c.benchmark_group("workloads/random_insert");
+
+    for count in WORKLOAD_SIZES {
+        let choices = random_gap_choices(count);
+        group.throughput(Throughput::Elements(count));
+        group.bench_with_input(
+            BenchmarkId::new("fracindex", count),
+            &choices,
+            |b, choices| {
+                b.iter(|| {
+                    black_box(random_insert_workload::<Fracindex, false>(black_box(
+                        choices,
+                    )))
+                })
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("fractional_index", count),
+            &choices,
+            |b, choices| {
+                b.iter(|| {
+                    black_box(random_insert_workload::<FractionalIndex, false>(black_box(
+                        choices,
+                    )))
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn benchmarks(c: &mut Criterion) {
     validate_adapter::<Fracindex>();
     validate_adapter::<FractionalIndex>();
+    validate_random_insert_workload::<Fracindex>();
+    validate_random_insert_workload::<FractionalIndex>();
 
     benchmark_default(c);
     benchmark_before(c);
@@ -353,6 +474,7 @@ fn benchmarks(c: &mut Criterion) {
     benchmark_append(c);
     benchmark_prepend(c);
     benchmark_dense_between(c);
+    benchmark_random_insert(c);
 }
 
 criterion_group! {

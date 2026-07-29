@@ -9,6 +9,7 @@ smallvec = "1.15.2"
 [dev-dependencies]
 criterion = "0.8.2"
 fractional_index = { version = "2.0.2", default-features = false }
+rand = "0.10.2"
 
 [[bench]]
 name = "comparison"
