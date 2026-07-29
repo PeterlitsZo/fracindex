@@ -5,3 +5,11 @@ edition = "2024"
 
 [dependencies]
 smallvec = "1.15.2"
+
+[dev-dependencies]
+criterion = "0.8.2"
+fractional_index = { version = "2.0.2", default-features = false }
+
+[[bench]]
+name = "comparison"
+harness = false
