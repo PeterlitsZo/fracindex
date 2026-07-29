@@ -71,7 +71,12 @@ impl Fracindex {
         Some(Self { inner })
     }
 
-    pub fn new_after(other: &Self, policy: FracindexPolicy) -> Self {
+    pub fn new_after(other: &Self) -> Self {
+        let policy = FracindexPolicy::default();
+        Self::new_after_with_policy(other, policy)
+    }
+
+    pub fn new_after_with_policy(other: &Self, policy: FracindexPolicy) -> Self {
         let other_inner = &other.inner;
         let other_len = other_inner.len();
         // The final component must not be zero in a valid fracindex.
@@ -104,7 +109,12 @@ impl Fracindex {
         Self { inner }
     }
 
-    pub fn new_before(other: &Self, policy: FracindexPolicy) -> Self {
+    pub fn new_before(other: &Self) -> Self {
+        let policy = FracindexPolicy::default();
+        Self::new_before_with_policy(other, policy)
+    }
+
+    pub fn new_before_with_policy(other: &Self, policy: FracindexPolicy) -> Self {
         let other_inner = &other.inner;
         let other_len = other_inner.len();
         // The final component must not be zero in a valid fracindex.
@@ -308,7 +318,7 @@ mod tests {
 
         for (input, expected) in test_cases {
             let current = fracindex(input);
-            let next = Fracindex::new_after(&current, FracindexPolicy::Random);
+            let next = Fracindex::new_after_with_policy(&current, FracindexPolicy::Random);
             assert_words(&next, expected);
             assert!(next > current, "input: {input:?}");
         }
@@ -327,7 +337,7 @@ mod tests {
 
         for (input, expected) in test_cases {
             let current = fracindex(input);
-            let next = Fracindex::new_after(&current, FracindexPolicy::Sequential);
+            let next = Fracindex::new_after(&current);
             assert_words(&next, expected);
             assert!(next > current, "input: {input:?}");
         }
@@ -346,7 +356,7 @@ mod tests {
 
         for (input, expected) in test_cases {
             let current = fracindex(input);
-            let previous = Fracindex::new_before(&current, FracindexPolicy::Random);
+            let previous = Fracindex::new_before_with_policy(&current, FracindexPolicy::Random);
             assert_words(&previous, expected);
             assert!(previous < current, "input: {input:?}");
         }
@@ -367,7 +377,7 @@ mod tests {
 
         for (input, expected) in test_cases {
             let current = fracindex(input);
-            let previous = Fracindex::new_before(&current, FracindexPolicy::Sequential);
+            let previous = Fracindex::new_before(&current);
             assert_words(&previous, expected);
             assert!(previous < current, "input: {input:?}");
         }
@@ -427,7 +437,7 @@ mod tests {
     #[test]
     fn test_repeated_new_between_stays_strictly_ordered() {
         let left = Fracindex::default();
-        let mut right = Fracindex::new_after(&left, FracindexPolicy::Sequential);
+        let mut right = Fracindex::new_after(&left);
 
         for iteration in 0..64 {
             let next = Fracindex::new_between(&left, &right)
@@ -492,10 +502,7 @@ mod tests {
             ordered_indexes.insert(Rc::clone(&to_insert_index));
             random_indexes.push(Rc::clone(&to_insert_index));
 
-            to_insert_index = Rc::new(Fracindex::new_after(
-                &to_insert_index,
-                FracindexPolicy::Sequential,
-            ))
+            to_insert_index = Rc::new(Fracindex::new_after(&to_insert_index))
         }
 
         for iteration in 0..10_000 {
@@ -503,7 +510,7 @@ mod tests {
             match rand_choice {
                 i if i <= 5 => {
                     let first = ordered_indexes.first().unwrap();
-                    let index = Fracindex::new_before(first.as_ref(), policy());
+                    let index = Fracindex::new_before_with_policy(first.as_ref(), policy());
                     assert!(
                         &index < first.as_ref(),
                         "iteration {iteration}, before insertion"
@@ -518,7 +525,7 @@ mod tests {
                 }
                 i if i > 5 && i <= 10 => {
                     let last = ordered_indexes.last().unwrap();
-                    let index = Fracindex::new_after(last.as_ref(), policy());
+                    let index = Fracindex::new_after_with_policy(last.as_ref(), policy());
                     assert!(
                         last.as_ref() < &index,
                         "iteration {iteration}, after insertion"

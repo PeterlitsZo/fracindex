@@ -30,11 +30,11 @@ impl BenchIndex for Fracindex {
     }
 
     fn new_before(other: &Self) -> Self {
-        Self::new_before(other, fracindex::FracindexPolicy::Sequential)
+        Self::new_before(other)
     }
 
     fn new_after(other: &Self) -> Self {
-        Self::new_after(other, fracindex::FracindexPolicy::Sequential)
+        Self::new_after(other)
     }
 
     fn new_between(left: &Self, right: &Self) -> Option<Self> {
@@ -46,11 +46,11 @@ impl BenchIndex for Fracindex {
     }
 
     fn new_before_prefer_random(other: &Self) -> Self {
-        Self::new_before(other, fracindex::FracindexPolicy::Random)
+        Self::new_before_with_policy(other, fracindex::FracindexPolicy::Random)
     }
 
     fn new_after_prefer_random(other: &Self) -> Self {
-        Self::new_after(other, fracindex::FracindexPolicy::Random)
+        Self::new_after_with_policy(other, fracindex::FracindexPolicy::Random)
     }
 }
 
@@ -107,7 +107,7 @@ fn grow_after<T: BenchIndex>(target_len: usize) -> T {
 fn grow_fracindex_before(target_len: usize) -> Fracindex {
     let mut index = Fracindex::default();
     while index.to_bytes().len() < target_len {
-        index = Fracindex::new_before(&index, fracindex::FracindexPolicy::Random);
+        index = Fracindex::new_before_with_policy(&index, fracindex::FracindexPolicy::Random);
     }
     index
 }
@@ -115,7 +115,7 @@ fn grow_fracindex_before(target_len: usize) -> Fracindex {
 fn grow_fracindex_after(target_len: usize) -> Fracindex {
     let mut index = Fracindex::default();
     while index.to_bytes().len() < target_len {
-        index = Fracindex::new_after(&index, fracindex::FracindexPolicy::Random);
+        index = Fracindex::new_after_with_policy(&index, fracindex::FracindexPolicy::Random);
     }
     index
 }
@@ -250,14 +250,7 @@ fn benchmark_before(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("fracindex", label),
             &fracindex,
-            |b, index| {
-                b.iter(|| {
-                    black_box(Fracindex::new_before(
-                        black_box(index),
-                        fracindex::FracindexPolicy::Sequential,
-                    ))
-                })
-            },
+            |b, index| b.iter(|| black_box(Fracindex::new_before(black_box(index)))),
         );
         group.bench_with_input(
             BenchmarkId::new("fractional_index", label),
@@ -279,14 +272,7 @@ fn benchmark_after(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("fracindex", label),
             &fracindex,
-            |b, index| {
-                b.iter(|| {
-                    black_box(Fracindex::new_after(
-                        black_box(index),
-                        fracindex::FracindexPolicy::Sequential,
-                    ))
-                })
-            },
+            |b, index| b.iter(|| black_box(Fracindex::new_after(black_box(index)))),
         );
         group.bench_with_input(
             BenchmarkId::new("fractional_index", label),
