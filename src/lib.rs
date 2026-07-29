@@ -1,5 +1,16 @@
 use smallvec::{SmallVec, smallvec};
 
+#[derive(Default)]
+pub enum FracindexPolicy {
+    // Helpful if the new element is inserted randomly.
+    Random,
+    // Helpful if the new element is inserted sequentially.
+    //
+    // Note: For real world, this is a good default policy.
+    #[default]
+    Sequential,
+}
+
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct Fracindex {
     inner: SmallVec<[u8; 16]>,
@@ -31,23 +42,40 @@ impl Fracindex {
         })
     }
 
-    pub fn new_after(other: &Self) -> Self {
+    pub fn new_after(other: &Self, policy: FracindexPolicy) -> Self {
         let other_bytes = other.to_bytes();
+        let other_len = other_bytes.len();
+        // The last byte must not be zero (not a valid fracindex).
+        debug_assert_ne!(other_bytes[other_len - 1], 0);
         for i in 0..other_bytes.len() {
             if other_bytes[i] < 255 {
-                let mut inner = SmallVec::from_slice(other_bytes);
-                inner[i] = inner[i] / 2 + 128;
+                let mut inner = SmallVec::from_slice(&other_bytes[0..=i]);
+                match policy {
+                    FracindexPolicy::Random => {
+                        inner[i] = inner[i] / 2 + 128;
+                    }
+                    FracindexPolicy::Sequential => {
+                        inner[i] += 1;
+                    }
+                }
                 return Self { inner };
             }
         }
         let len = other.inner.len() + 1;
         let mut inner = SmallVec::with_capacity(len);
         inner.extend_from_slice(&other.inner);
-        inner.push(128);
+        match policy {
+            FracindexPolicy::Random => {
+                inner.push(128);
+            }
+            FracindexPolicy::Sequential => {
+                inner.push(1);
+            }
+        }
         Self { inner }
     }
 
-    pub fn new_before(other: &Self) -> Self {
+    pub fn new_before(other: &Self, policy: FracindexPolicy) -> Self {
         let other_bytes = other.to_bytes();
         let other_len = other_bytes.len();
         // The last byte must not be zero (not a valid fracindex).
@@ -55,7 +83,14 @@ impl Fracindex {
         for i in 0..other_bytes.len() {
             if other_bytes[i] > 1 {
                 let mut inner = SmallVec::from_slice(&other_bytes[0..=i]);
-                inner[i] /= 2;
+                match policy {
+                    FracindexPolicy::Random => {
+                        inner[i] /= 2;
+                    }
+                    FracindexPolicy::Sequential => {
+                        inner[i] -= 1;
+                    }
+                }
                 return Self { inner };
             }
         }
@@ -63,7 +98,14 @@ impl Fracindex {
         let mut inner = SmallVec::with_capacity(len);
         inner.extend_from_slice(&other.inner);
         inner[len - 2] = 0;
-        inner.push(128);
+        match policy {
+            FracindexPolicy::Random => {
+                inner.push(128);
+            }
+            FracindexPolicy::Sequential => {
+                inner.push(255);
+            }
+        }
         Self { inner }
     }
 
@@ -159,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_after() {
+    fn test_new_after_random() {
         let mut fracindex = Fracindex::default();
         let wanted: &[&[u8]] = &[
             &[128],
@@ -182,14 +224,52 @@ mod tests {
         ];
         for (i, expected) in wanted.iter().enumerate() {
             assert_eq!(fracindex.to_bytes(), *expected, "iteration {}", i);
-            let next_fracindex = Fracindex::new_after(&fracindex);
+            let next_fracindex = Fracindex::new_after(&fracindex, FracindexPolicy::Random);
             assert!(next_fracindex > fracindex, "iteration {}", i);
             fracindex = next_fracindex;
         }
     }
 
     #[test]
-    fn test_new_before() {
+    fn test_new_after_sequential() {
+        struct TestCase {
+            a: &'static [u8],
+            expected: Option<&'static [u8]>,
+        }
+        macro_rules! test_case {
+            ($a:expr => $expected:expr) => {
+                TestCase {
+                    a: $a,
+                    expected: $expected,
+                }
+            };
+        }
+        let test_cases: &[TestCase] = &[
+            test_case! { &[128] => Some(&[129]) },
+            test_case! { &[129] => Some(&[130]) },
+            test_case! { &[254] => Some(&[255]) },
+            test_case! { &[255] => Some(&[255, 1]) },
+            test_case! { &[255, 1] => Some(&[255, 2]) },
+            test_case! { &[255, 254] => Some(&[255, 255]) },
+            test_case! { &[255, 255] => Some(&[255, 255, 1]) },
+            test_case! { &[128, 128] => Some(&[129]) },
+        ];
+        for (i, test_case) in test_cases.iter().enumerate() {
+            let fracindex = Fracindex::from_bytes(test_case.a).unwrap();
+            let expected = test_case.expected;
+            let next_fracindex = Fracindex::new_after(&fracindex, FracindexPolicy::Sequential);
+            assert_eq!(
+                next_fracindex.to_bytes(),
+                expected.unwrap(),
+                "iteration {}",
+                i
+            );
+            assert!(next_fracindex > fracindex, "iteration {}", i);
+        }
+    }
+
+    #[test]
+    fn test_new_before_random() {
         let mut fracindex = Fracindex::default();
         let wanted: &[&[u8]] = &[
             &[128],
@@ -212,9 +292,47 @@ mod tests {
         ];
         for (i, expected) in wanted.iter().enumerate() {
             assert_eq!(fracindex.to_bytes(), *expected, "iteration {}", i);
-            let next_fracindex = Fracindex::new_before(&fracindex);
+            let next_fracindex = Fracindex::new_before(&fracindex, FracindexPolicy::Random);
             assert!(next_fracindex < fracindex, "iteration {}", i);
             fracindex = next_fracindex;
+        }
+    }
+
+    #[test]
+    fn test_new_before_sequential() {
+        struct TestCase {
+            a: &'static [u8],
+            expected: Option<&'static [u8]>,
+        }
+        macro_rules! test_case {
+            ($a:expr => $expected:expr) => {
+                TestCase {
+                    a: $a,
+                    expected: $expected,
+                }
+            };
+        }
+        let test_cases: &[TestCase] = &[
+            test_case! { &[128] => Some(&[127]) },
+            test_case! { &[127] => Some(&[126]) },
+            test_case! { &[2] => Some(&[1]) },
+            test_case! { &[1] => Some(&[0, 255]) },
+            test_case! { &[0, 255] => Some(&[0, 254]) },
+            test_case! { &[0, 2] => Some(&[0, 1]) },
+            test_case! { &[0, 1] => Some(&[0, 0, 255]) },
+            test_case! { &[128, 128] => Some(&[127]) },
+        ];
+        for (i, test_case) in test_cases.iter().enumerate() {
+            let fracindex = Fracindex::from_bytes(test_case.a).unwrap();
+            let expected = test_case.expected;
+            let next_fracindex = Fracindex::new_before(&fracindex, FracindexPolicy::Sequential);
+            assert_eq!(
+                next_fracindex.to_bytes(),
+                expected.unwrap(),
+                "iteration {}",
+                i
+            );
+            assert!(next_fracindex < fracindex, "iteration {}", i);
         }
     }
 

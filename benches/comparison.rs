@@ -20,11 +20,11 @@ impl BenchIndex for Fracindex {
     }
 
     fn new_before(other: &Self) -> Self {
-        Self::new_before(other)
+        Self::new_before(other, fracindex::FracindexPolicy::Sequential)
     }
 
     fn new_after(other: &Self) -> Self {
-        Self::new_after(other)
+        Self::new_after(other, fracindex::FracindexPolicy::Sequential)
     }
 
     fn new_between(left: &Self, right: &Self) -> Option<Self> {
@@ -146,7 +146,14 @@ fn benchmark_before(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("fracindex", label),
             &fracindex,
-            |b, index| b.iter(|| black_box(Fracindex::new_before(black_box(index)))),
+            |b, index| {
+                b.iter(|| {
+                    black_box(Fracindex::new_before(
+                        black_box(index),
+                        fracindex::FracindexPolicy::Sequential,
+                    ))
+                })
+            },
         );
         group.bench_with_input(
             BenchmarkId::new("fractional_index", label),
@@ -168,7 +175,14 @@ fn benchmark_after(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("fracindex", label),
             &fracindex,
-            |b, index| b.iter(|| black_box(Fracindex::new_after(black_box(index)))),
+            |b, index| {
+                b.iter(|| {
+                    black_box(Fracindex::new_after(
+                        black_box(index),
+                        fracindex::FracindexPolicy::Sequential,
+                    ))
+                })
+            },
         );
         group.bench_with_input(
             BenchmarkId::new("fractional_index", label),
