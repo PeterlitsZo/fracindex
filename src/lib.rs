@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use smallvec::{SmallVec, smallvec};
 
 #[derive(Default)]
@@ -27,6 +29,12 @@ impl Default for Fracindex {
         Self {
             inner: smallvec![DEFAULT],
         }
+    }
+}
+
+impl Debug for Fracindex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Fracindex({})", self.to_hex())
     }
 }
 
@@ -201,11 +209,24 @@ impl Fracindex {
         }
         bytes
     }
+
+    pub fn to_hex(&self) -> String {
+        self.to_bytes()
+            .iter()
+            .map(|byte| format!("{:02x}", byte))
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::RngExt;
+    use std::{
+        collections::BTreeSet,
+        ops::Bound::{Excluded, Unbounded},
+        rc::Rc,
+    };
 
     fn bytes(words: &[u32]) -> Vec<u8> {
         let mut result: Vec<u8> = words.iter().flat_map(|word| word.to_be_bytes()).collect();
@@ -414,6 +435,162 @@ mod tests {
             assert!(left < next, "iteration {iteration}");
             assert!(next < right, "iteration {iteration}");
             right = next;
+        }
+    }
+
+    fn insert_index(
+        ordered_indexes: &mut BTreeSet<Rc<Fracindex>>,
+        random_indexes: &mut Vec<Rc<Fracindex>>,
+        index: Fracindex,
+        iteration: usize,
+        action: &str,
+    ) {
+        let index = Rc::new(index);
+        assert!(
+            ordered_indexes.insert(Rc::clone(&index)),
+            "iteration {iteration}, {action}"
+        );
+        random_indexes.push(index);
+    }
+
+    fn random_between(
+        ordered_indexes: &BTreeSet<Rc<Fracindex>>,
+        random_indexes: &[Rc<Fracindex>],
+        rng: &mut impl rand::Rng,
+        iteration: usize,
+    ) -> Fracindex {
+        let anchor = Rc::clone(&random_indexes[rng.random_range(0..random_indexes.len())]);
+        let (left, right) = if ordered_indexes.last().unwrap() == &anchor {
+            let left = ordered_indexes
+                .range(..Rc::clone(&anchor))
+                .next_back()
+                .unwrap();
+            (left.as_ref(), anchor.as_ref())
+        } else {
+            let right = ordered_indexes
+                .range((Excluded(Rc::clone(&anchor)), Unbounded))
+                .next()
+                .unwrap();
+            (anchor.as_ref(), right.as_ref())
+        };
+        let index = Fracindex::new_between(left, right)
+            .unwrap_or_else(|| panic!("iteration {iteration}, no index between adjacent orders"));
+        assert!(
+            left < &index && &index < right,
+            "iteration {iteration}, invalid index between adjacent orders"
+        );
+        index
+    }
+
+    fn assert_random_insertions_stay_strictly_ordered(policy: impl Fn() -> FracindexPolicy) {
+        let mut rng = rand::rng();
+
+        let mut ordered_indexes = BTreeSet::new();
+        let mut random_indexes = vec![];
+        let mut to_insert_index = Rc::new(Fracindex::default());
+        for _ in 0..4 {
+            ordered_indexes.insert(Rc::clone(&to_insert_index));
+            random_indexes.push(Rc::clone(&to_insert_index));
+
+            to_insert_index = Rc::new(Fracindex::new_after(
+                &to_insert_index,
+                FracindexPolicy::Sequential,
+            ))
+        }
+
+        for iteration in 0..10_000 {
+            let rand_choice = rng.random_range(0..100);
+            match rand_choice {
+                i if i <= 5 => {
+                    let first = ordered_indexes.first().unwrap();
+                    let index = Fracindex::new_before(first.as_ref(), policy());
+                    assert!(
+                        &index < first.as_ref(),
+                        "iteration {iteration}, before insertion"
+                    );
+                    insert_index(
+                        &mut ordered_indexes,
+                        &mut random_indexes,
+                        index,
+                        iteration,
+                        "before insertion",
+                    );
+                }
+                i if i > 5 && i <= 10 => {
+                    let last = ordered_indexes.last().unwrap();
+                    let index = Fracindex::new_after(last.as_ref(), policy());
+                    assert!(
+                        last.as_ref() < &index,
+                        "iteration {iteration}, after insertion"
+                    );
+                    insert_index(
+                        &mut ordered_indexes,
+                        &mut random_indexes,
+                        index,
+                        iteration,
+                        "after insertion",
+                    );
+                }
+                i if i > 10 && i <= 30 => {
+                    let index =
+                        random_between(&ordered_indexes, &random_indexes, &mut rng, iteration);
+                    insert_index(
+                        &mut ordered_indexes,
+                        &mut random_indexes,
+                        index,
+                        iteration,
+                        "between insertion",
+                    );
+                }
+                _ => {
+                    let removal_position = rng.random_range(0..random_indexes.len());
+                    let removed = random_indexes.swap_remove(removal_position);
+                    assert!(
+                        ordered_indexes.remove(&removed),
+                        "iteration {iteration}, removal at position {removal_position}"
+                    );
+
+                    let index =
+                        random_between(&ordered_indexes, &random_indexes, &mut rng, iteration);
+                    insert_index(
+                        &mut ordered_indexes,
+                        &mut random_indexes,
+                        index,
+                        iteration,
+                        "shuffled insertion",
+                    );
+                }
+            }
+
+            assert_eq!(ordered_indexes.len(), random_indexes.len());
+        }
+
+        let mut indexes = ordered_indexes.iter();
+        let mut previous = indexes.next().unwrap();
+        for (position, current) in indexes.enumerate() {
+            assert!(
+                previous.as_ref() < current.as_ref(),
+                "unordered indexes at position {position}"
+            );
+            assert!(
+                previous.to_bytes() < current.to_bytes(),
+                "unordered bytes at position {position}"
+            );
+            previous = current;
+        }
+    }
+
+    #[test]
+    fn test_random_policy_insertions_stay_strictly_ordered() {
+        for _i in 1..10 {
+            assert_random_insertions_stay_strictly_ordered(|| FracindexPolicy::Random);
+        }
+    }
+
+    #[test]
+    fn test_sequential_policy_insertions_stay_strictly_ordered() {
+        for _i in 1..10 {
+            assert_random_insertions_stay_strictly_ordered(|| FracindexPolicy::Sequential);
         }
     }
 }
