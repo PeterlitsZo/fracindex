@@ -83,20 +83,28 @@ impl Fracindex {
         debug_assert_ne!(other_inner[other_len - 1], MIN);
 
         for i in 0..other_inner.len() {
+            use FracindexPolicy::*;
+
             let value = other_inner[i];
+            let get_midpoint_to_max = || {
+                let distance = MAX - value;
+                let mut inner = SmallVec::from_slice(&other_inner[..=i]);
+                inner[i] = value + distance / 2 + distance % 2;
+                Self { inner }
+            };
             match &policy {
-                FracindexPolicy::Random if value < MAX => {
-                    let distance = MAX - value;
-                    let mut inner = SmallVec::from_slice(&other_inner[..=i]);
-                    inner[i] = value + distance / 2 + distance % 2;
-                    return Self { inner };
-                }
-                FracindexPolicy::Sequential if value <= MAX - GAP => {
+                Sequential if value <= MAX - GAP * 2 => {
                     let mut inner = SmallVec::from_slice(&other_inner[..=i]);
                     inner[i] += GAP;
                     return Self { inner };
                 }
-                FracindexPolicy::Random | FracindexPolicy::Sequential => {}
+                Random if value < MAX => {
+                    return get_midpoint_to_max();
+                }
+                Sequential if value != MAX => {
+                    return get_midpoint_to_max();
+                }
+                _ => {}
             }
         }
 
@@ -121,19 +129,27 @@ impl Fracindex {
         debug_assert_ne!(other_inner[other_len - 1], MIN);
 
         for i in 0..other_inner.len() {
+            use FracindexPolicy::*;
+
             let value = other_inner[i];
+            let get_midpoint_to_min = || {
+                let mut inner = SmallVec::from_slice(&other_inner[..=i]);
+                inner[i] /= 2;
+                Self { inner }
+            };
             match &policy {
-                FracindexPolicy::Random if value > 1 => {
-                    let mut inner = SmallVec::from_slice(&other_inner[..=i]);
-                    inner[i] /= 2;
-                    return Self { inner };
-                }
-                FracindexPolicy::Sequential if value > GAP => {
+                Sequential if value >= GAP * 2 => {
                     let mut inner = SmallVec::from_slice(&other_inner[..=i]);
                     inner[i] -= GAP;
                     return Self { inner };
                 }
-                FracindexPolicy::Random | FracindexPolicy::Sequential => {}
+                Random if value > 1 => {
+                    return get_midpoint_to_min();
+                }
+                Sequential if value > 1 => {
+                    return get_midpoint_to_min();
+                }
+                _ => {}
             }
         }
 
@@ -300,6 +316,7 @@ mod tests {
         }
     }
 
+    #[track_caller]
     fn assert_words(actual: &Fracindex, expected: &[u32]) {
         assert_eq!(actual.inner.as_slice(), expected);
         assert_eq!(actual.to_bytes(), bytes(expected));
@@ -328,10 +345,13 @@ mod tests {
     fn test_new_after_sequential() {
         let test_cases: &[(&[u32], &[u32])] = &[
             (&[DEFAULT], &[DEFAULT + GAP]),
-            (&[MAX - GAP], &[MAX]),
-            (&[MAX - GAP + 1], &[MAX - GAP + 1, GAP]),
+            (&[MAX - GAP * 2], &[MAX - GAP]),
+            (&[MAX - GAP * 2 + 2], &[MAX - GAP + 1]),
+            (&[MAX - GAP * 2 + 64], &[MAX - GAP + 32]),
+            (&[MAX - GAP], &[MAX - GAP / 2]),
+            (&[MAX - GAP + 1], &[MAX - GAP / 2 + 1]),
             (&[MAX], &[MAX, GAP]),
-            (&[MAX, MAX - GAP], &[MAX, MAX]),
+            (&[MAX, MAX - GAP], &[MAX, MAX - GAP / 2]),
             (&[DEFAULT, DEFAULT], &[DEFAULT + GAP]),
         ];
 
@@ -366,12 +386,17 @@ mod tests {
     fn test_new_before_sequential() {
         let test_cases: &[(&[u32], &[u32])] = &[
             (&[DEFAULT], &[DEFAULT - GAP]),
-            (&[GAP + 1], &[1]),
-            (&[GAP], &[MIN, MAX]),
-            (&[GAP - 1], &[MIN, MAX]),
+            (&[GAP * 2], &[GAP]),
+            (&[GAP * 2 - 1], &[GAP - 1]),
+            (&[GAP * 2 - 2], &[GAP - 1]),
+            (&[GAP * 2 - 64], &[GAP - 32]),
+            (&[GAP + 1], &[GAP / 2]),
+            (&[GAP], &[GAP / 2]),
+            (&[GAP - 1], &[GAP / 2 - 1]),
             (&[1], &[MIN, MAX]),
             (&[MIN, MAX], &[MIN, MAX - GAP]),
-            (&[MIN, GAP], &[MIN, MIN, MAX]),
+            (&[MIN, MAX - GAP], &[MIN, MAX - 2 * GAP]),
+            (&[MIN, GAP], &[MIN, GAP / 2]),
             (&[DEFAULT, DEFAULT], &[DEFAULT - GAP]),
         ];
 
