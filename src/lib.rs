@@ -10,7 +10,7 @@ use smallvec::{SmallVec, smallvec};
 
 /// Controls how space is allocated when generating an index before or after
 /// another index.
-#[derive(Default)]
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FracindexPolicy {
     /// Chooses a midpoint toward the available boundary.
     ///
@@ -31,7 +31,7 @@ pub enum FracindexPolicy {
 ///
 /// Indexes implement [`Ord`], and their canonical byte encodings returned by
 /// [`Fracindex::to_bytes`] have the same lexicographic ordering.
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Fracindex {
     inner: SmallVec<[u32; 4]>,
 }
@@ -277,10 +277,28 @@ impl Fracindex {
     /// Formats the canonical byte representation as lowercase hexadecimal
     /// without a prefix.
     pub fn to_hex(&self) -> String {
-        self.to_bytes()
+        const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+        let trailing_zero_bytes = self
+            .inner
+            .last()
+            .expect("a fractional index must contain at least one component")
+            .trailing_zeros() as usize
+            / 8;
+        let byte_count = self.inner.len() * BYTES_CNT - trailing_zero_bytes;
+        let mut hex = String::with_capacity(byte_count * 2);
+
+        for byte in self
+            .inner
             .iter()
-            .map(|byte| format!("{:02x}", byte))
-            .collect()
+            .flat_map(|word| word.to_be_bytes())
+            .take(byte_count)
+        {
+            hex.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+            hex.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
+        }
+
+        hex
     }
 }
 
@@ -289,10 +307,61 @@ mod tests {
     use super::*;
     use rand::RngExt;
     use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        cell::Cell,
         collections::BTreeSet,
         ops::Bound::{Excluded, Unbounded},
         rc::Rc,
     };
+
+    struct CountingAllocator;
+
+    thread_local! {
+        static TRACK_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
+        static ALLOCATION_COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let pointer = unsafe { System.alloc(layout) };
+            if !pointer.is_null() {
+                record_allocation();
+            }
+            pointer
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(pointer, layout) };
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    fn record_allocation() {
+        let is_tracking = TRACK_ALLOCATIONS
+            .try_with(|tracking| tracking.get())
+            .unwrap_or(false);
+        if is_tracking {
+            let _ = ALLOCATION_COUNT.try_with(|count| count.set(count.get() + 1));
+        }
+    }
+
+    fn count_allocations<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+        ALLOCATION_COUNT.with(|count| count.set(0));
+        TRACK_ALLOCATIONS.with(|tracking| {
+            assert!(
+                !tracking.replace(true),
+                "allocation tracking cannot be nested"
+            );
+        });
+
+        let result = operation();
+
+        TRACK_ALLOCATIONS.with(|tracking| tracking.set(false));
+        let count = ALLOCATION_COUNT.with(|count| count.get());
+        (result, count)
+    }
 
     fn bytes(words: &[u32]) -> Vec<u8> {
         let mut result: Vec<u8> = words.iter().flat_map(|word| word.to_be_bytes()).collect();
@@ -338,6 +407,25 @@ mod tests {
         let fracindex = Fracindex::from_bytes(&encoded).unwrap();
         assert_eq!(fracindex.inner.as_slice(), &[GAP]);
         assert_eq!(fracindex.to_bytes(), bytes(&[GAP]));
+    }
+
+    #[test]
+    fn test_to_hex_is_canonical_and_uses_one_allocation() {
+        let test_cases: &[(&[u32], &str)] = &[
+            (&[0x1200_0000], "12"),
+            (&[0x1234_0000], "1234"),
+            (&[0x1234_5600], "123456"),
+            (&[0x1234_5678], "12345678"),
+            (&[0x0000_0001, 0x1234_5600], "00000001123456"),
+        ];
+
+        for &(words, expected) in test_cases {
+            let fracindex = fracindex(words);
+            let (hex, allocation_count) = count_allocations(|| fracindex.to_hex());
+
+            assert_eq!(hex, expected, "words: {words:?}");
+            assert_eq!(allocation_count, 1, "words: {words:?}");
+        }
     }
 
     #[test]
