@@ -1,18 +1,36 @@
+//! Fractional indexes for assigning stable, sortable positions to ordered values.
+//!
+//! A [`Fracindex`] can be generated before, after, or between existing indexes
+//! without renumbering the rest of the sequence. Its byte representation preserves
+//! the same ordering as the index itself.
+
 use std::fmt::Debug;
 
 use smallvec::{SmallVec, smallvec};
 
+/// Controls how space is allocated when generating an index before or after
+/// another index.
 #[derive(Default)]
 pub enum FracindexPolicy {
-    // Helpful if the new element is inserted randomly.
+    /// Chooses a midpoint toward the available boundary.
+    ///
+    /// This policy leaves room for insertions whose future positions are not
+    /// expected to follow a predictable direction.
     Random,
-    // Helpful if the new element is inserted sequentially.
-    //
-    // Note: For real world, this is a good default policy.
+    /// Moves by a fixed gap when possible and falls back to a midpoint near a
+    /// component boundary.
+    ///
+    /// This is the default policy and is suitable for repeated appends or
+    /// prepends.
     #[default]
     Sequential,
 }
 
+/// A variable-length fractional index used to order values without renumbering
+/// existing indexes.
+///
+/// Indexes implement [`Ord`], and their canonical byte encodings returned by
+/// [`Fracindex::to_bytes`] have the same lexicographic ordering.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct Fracindex {
     inner: SmallVec<[u32; 4]>,
@@ -39,6 +57,12 @@ impl Debug for Fracindex {
 }
 
 impl Fracindex {
+    /// Decodes a fractional index from its big-endian byte representation.
+    ///
+    /// An incomplete final four-byte component is padded with zero bytes. The
+    /// decoded value is normalized by removing trailing zero components.
+    ///
+    /// Returns [`None`] when `bytes` is empty or contains no non-zero component.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.is_empty() {
             // Empty bytes cannot represent a valid fracindex.
@@ -71,11 +95,14 @@ impl Fracindex {
         Some(Self { inner })
     }
 
+    /// Creates an index that sorts after `other` using the default
+    /// [`FracindexPolicy::Sequential`] policy.
     pub fn new_after(other: &Self) -> Self {
         let policy = FracindexPolicy::default();
         Self::new_after_with_policy(other, policy)
     }
 
+    /// Creates an index that sorts after `other` using `policy`.
     pub fn new_after_with_policy(other: &Self, policy: FracindexPolicy) -> Self {
         let other_inner = &other.inner;
         let other_len = other_inner.len();
@@ -117,11 +144,14 @@ impl Fracindex {
         Self { inner }
     }
 
+    /// Creates an index that sorts before `other` using the default
+    /// [`FracindexPolicy::Sequential`] policy.
     pub fn new_before(other: &Self) -> Self {
         let policy = FracindexPolicy::default();
         Self::new_before_with_policy(other, policy)
     }
 
+    /// Creates an index that sorts before `other` using `policy`.
     pub fn new_before_with_policy(other: &Self, policy: FracindexPolicy) -> Self {
         let other_inner = &other.inner;
         let other_len = other_inner.len();
@@ -164,6 +194,10 @@ impl Fracindex {
         Self { inner }
     }
 
+    /// Creates an index that sorts strictly between `a` and `b`.
+    ///
+    /// Returns [`None`] when the bounds are equal, reversed, or do not admit a
+    /// valid fractional index between them.
     pub fn new_between(a: &Self, b: &Self) -> Option<Self> {
         let a_len = a.inner.len();
         let b_len = b.inner.len();
@@ -225,6 +259,10 @@ impl Fracindex {
         Some(Self { inner })
     }
 
+    /// Encodes this index as canonical big-endian bytes.
+    ///
+    /// Trailing zero bytes are omitted. Comparing the returned byte vectors
+    /// lexicographically produces the same ordering as comparing the indexes.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(self.inner.len() * BYTES_CNT);
         for word in &self.inner {
@@ -236,6 +274,8 @@ impl Fracindex {
         bytes
     }
 
+    /// Formats the canonical byte representation as lowercase hexadecimal
+    /// without a prefix.
     pub fn to_hex(&self) -> String {
         self.to_bytes()
             .iter()
