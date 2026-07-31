@@ -95,6 +95,37 @@ impl Fracindex {
         Some(Self { inner })
     }
 
+    /// Decodes a fractional index from an unprefixed hexadecimal string.
+    ///
+    /// Both lowercase and uppercase ASCII hexadecimal digits are accepted. The
+    /// input must contain an even number of digits because each pair represents
+    /// one byte. Decoded bytes use the same normalization as
+    /// [`Fracindex::from_bytes`].
+    ///
+    /// Returns [`None`] when `hex` is empty, has an odd length, contains a
+    /// non-hexadecimal character, or decodes to no non-zero component.
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        if hex.is_empty() || hex.len() % 2 != 0 {
+            return None;
+        }
+
+        let decode_nibble = |digit| match digit {
+            b'0'..=b'9' => Some(digit - b'0'),
+            b'a'..=b'f' => Some(digit - b'a' + 10),
+            b'A'..=b'F' => Some(digit - b'A' + 10),
+            _ => None,
+        };
+
+        let mut bytes = Vec::with_capacity(hex.len() / 2);
+        for pair in hex.as_bytes().chunks_exact(2) {
+            let high = decode_nibble(pair[0])?;
+            let low = decode_nibble(pair[1])?;
+            bytes.push(high << 4 | low);
+        }
+
+        Self::from_bytes(&bytes)
+    }
+
     /// Creates an index that sorts after `other` using the default
     /// [`FracindexPolicy::Sequential`] policy.
     pub fn new_after(other: &Self) -> Self {
@@ -407,6 +438,49 @@ mod tests {
         let fracindex = Fracindex::from_bytes(&encoded).unwrap();
         assert_eq!(fracindex.inner.as_slice(), &[GAP]);
         assert_eq!(fracindex.to_bytes(), bytes(&[GAP]));
+    }
+
+    #[test]
+    fn test_from_hex_decodes_lowercase_uppercase_and_partial_words() {
+        let test_cases: &[(&str, &[u32])] = &[
+            ("12", &[0x1200_0000]),
+            ("12345678", &[0x1234_5678]),
+            ("aBcDeF", &[0xabcd_ef00]),
+            ("00000001123456", &[0x0000_0001, 0x1234_5600]),
+        ];
+
+        for &(hex, expected) in test_cases {
+            let fracindex = Fracindex::from_hex(hex).unwrap();
+            assert_words(&fracindex, expected);
+        }
+    }
+
+    #[test]
+    fn test_from_hex_round_trips_canonical_hex_and_normalizes_trailing_zero_words() {
+        let indexes = [
+            fracindex(&[0x1200_0000]),
+            fracindex(&[0x1234_5678]),
+            fracindex(&[0x0000_0001, 0x1234_5600]),
+        ];
+
+        for expected in indexes {
+            let hex = expected.to_hex();
+            assert_eq!(Fracindex::from_hex(&hex), Some(expected));
+        }
+
+        let normalized = Fracindex::from_hex("0000010000000000").unwrap();
+        assert_words(&normalized, &[0x0000_0100]);
+        assert_eq!(normalized.to_hex(), "000001");
+    }
+
+    #[test]
+    fn test_from_hex_rejects_empty_odd_invalid_prefixed_and_zero_inputs() {
+        for invalid in ["", "0", "123", "gg", "0x12", "１２", "00", "00000000"] {
+            assert!(
+                Fracindex::from_hex(invalid).is_none(),
+                "input should be rejected: {invalid:?}"
+            );
+        }
     }
 
     #[test]
