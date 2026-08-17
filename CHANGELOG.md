@@ -2,6 +2,13 @@
 
 Please follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+
+- Support `batch_new_before`, `batch_new_after` and `batch_new_between` methods
+  for `Fracindex`.
+
 ## v0.2.0 (2026-08-17)
 
 ### Added

@@ -268,6 +268,20 @@ impl Fracindex {
         Self { inner }
     }
 
+    /// Batch creates `count` indices that sort after `other`.
+    ///
+    /// The returned indices are sorted in ascending order.
+    pub fn new_after_batch(other: &Self, count: usize) -> Vec<Self> {
+        let mut result = Vec::with_capacity(count);
+        let mut tmp = Self::new_after(other);
+        for _ in 0..count {
+            let next_tmp = Self::new_after(&tmp);
+            result.push(tmp);
+            tmp = next_tmp;
+        }
+        result
+    }
+
     /// Creates an index that sorts before `other` using the default
     /// [`FracindexPolicy::Sequential`] policy.
     pub fn new_before(other: &Self) -> Self {
@@ -316,6 +330,21 @@ impl Fracindex {
             FracindexPolicy::Sequential => MAX,
         });
         Self { inner }
+    }
+
+    /// Batch creates `count` indices that sort before `other`.
+    ///
+    /// The returned indices are sorted in ascending order.
+    pub fn new_before_batch(other: &Self, count: usize) -> Vec<Self> {
+        let mut result = Vec::with_capacity(count);
+        let mut tmp = Self::new_before(other);
+        for _ in 0..count {
+            let next_tmp = Self::new_before(&tmp);
+            result.push(tmp);
+            tmp = next_tmp;
+        }
+        result.reverse();
+        result
     }
 
     /// Creates an index that sorts strictly between `a` and `b`.
@@ -390,6 +419,39 @@ impl Fracindex {
             inner.push(DEFAULT);
         }
         Ok(Self { inner })
+    }
+
+    /// Batch creates `count` indices that sort between `a` and `b`.
+    ///
+    /// The returned indices are sorted in ascending order.
+    pub fn batch_new_between(a: &Self, b: &Self, count: usize) -> FracindexResult<Vec<Self>> {
+        fn inner(
+            sink: &mut Vec<Fracindex>,
+            a: &Fracindex,
+            b: &Fracindex,
+            start: usize,
+            end: usize,
+        ) -> FracindexResult<()> {
+            if start >= end {
+                return Ok(());
+            }
+            if end - start == 1 {
+                sink[start] = Fracindex::new_between(a, b)?;
+                return Ok(());
+            }
+
+            let mid = (start + end) / 2;
+            let mid_val = Fracindex::new_between(a, b)?;
+            inner(sink, a, &mid_val, start, mid)?;
+            inner(sink, &mid_val, b, mid + 1, end)?;
+            sink[mid] = mid_val;
+
+            Ok(())
+        }
+
+        let mut result = vec![Fracindex::default(); count];
+        inner(&mut result, a, b, 0, count)?;
+        Ok(result)
     }
 
     /// Encodes this index as canonical big-endian bytes.
@@ -632,13 +694,11 @@ impl Fracindex {
 mod tests {
     use super::*;
     use rand::RngExt;
-    use std::{
-        alloc::{GlobalAlloc, Layout, System},
-        cell::Cell,
-        collections::BTreeSet,
-        ops::Bound::{Excluded, Unbounded},
-        rc::Rc,
-    };
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    use std::collections::BTreeSet;
+    use std::ops::Bound::{Excluded, Unbounded};
+    use std::rc::Rc;
 
     struct CountingAllocator;
 
@@ -1340,5 +1400,18 @@ mod tests {
                 expected, result[test_case.index], test_case.index
             );
         }
+    }
+
+    #[test]
+    fn test_batch_new_between() {
+        let a = Fracindex::default();
+        let b = Fracindex::new_after(&a);
+        let result = Fracindex::batch_new_between(&a, &b, 10).unwrap();
+        assert_eq!(result.len(), 10);
+        for i in 1..10 {
+            assert!(result[i - 1] < result[i]);
+        }
+        assert_eq!(result[0], Fracindex::from_hex("8000 000f").unwrap());
+        assert_eq!(result[9], Fracindex::from_hex("8000 00df").unwrap());
     }
 }
