@@ -14,7 +14,7 @@ trait BenchIndex: Ord + Sized {
     fn initial() -> Self;
     fn new_before(other: &Self) -> Self;
     fn new_after(other: &Self) -> Self;
-    fn new_between(left: &Self, right: &Self) -> Option<Self>;
+    fn new_between(left: &Self, right: &Self) -> Self;
     fn byte_len(&self) -> usize;
     fn new_before_prefer_random(other: &Self) -> Self {
         Self::new_before(other)
@@ -37,8 +37,8 @@ impl BenchIndex for Fracindex {
         Self::new_after(other)
     }
 
-    fn new_between(left: &Self, right: &Self) -> Option<Self> {
-        Self::new_between(left, right)
+    fn new_between(left: &Self, right: &Self) -> Self {
+        Self::new_between(left, right).unwrap()
     }
 
     fn byte_len(&self) -> usize {
@@ -67,8 +67,8 @@ impl BenchIndex for FractionalIndex {
         Self::new_after(other)
     }
 
-    fn new_between(left: &Self, right: &Self) -> Option<Self> {
-        Self::new_between(left, right)
+    fn new_between(left: &Self, right: &Self) -> Self {
+        Self::new_between(left, right).unwrap()
     }
 
     fn byte_len(&self) -> usize {
@@ -80,12 +80,11 @@ fn validate_adapter<T: BenchIndex>() {
     let index = T::initial();
     let before = T::new_before(&index);
     let after = T::new_after(&index);
-    let between = T::new_between(&index, &after).expect("ordered bounds must have a midpoint");
+    let between = T::new_between(&index, &after);
 
     assert!(before < index);
     assert!(index < between);
     assert!(between < after);
-    assert!(T::new_between(&after, &index).is_none());
 }
 
 fn grow_before<T: BenchIndex>(target_len: usize) -> T {
@@ -125,7 +124,7 @@ fn grow_between<T: BenchIndex>(target_len: usize) -> (T, T) {
     let mut right = T::new_after(&left);
 
     while left.byte_len().max(right.byte_len()) < target_len {
-        right = T::new_between(&left, &right).expect("ordered bounds must have a midpoint");
+        right = T::new_between(&left, &right);
     }
 
     assert!(left < right);
@@ -153,7 +152,7 @@ fn dense_between_workload<T: BenchIndex>(count: u64) -> T {
     let mut right = T::new_after(&left);
 
     for _ in 0..count {
-        right = T::new_between(&left, &right).expect("ordered bounds must have a midpoint");
+        right = T::new_between(&left, &right);
     }
 
     right
@@ -190,8 +189,7 @@ fn random_insert_workload<T: BenchIndex, const VALIDATE: bool>(
         let index = match (left, right) {
             (None, Some(right)) => T::new_before_prefer_random(&indexes[right]),
             (Some(left), None) => T::new_after_prefer_random(&indexes[left]),
-            (Some(left), Some(right)) => T::new_between(&indexes[left], &indexes[right])
-                .expect("ordered gap bounds must have a midpoint"),
+            (Some(left), Some(right)) => T::new_between(&indexes[left], &indexes[right]),
             (None, None) => unreachable!("a gap must have at least one bound"),
         };
 

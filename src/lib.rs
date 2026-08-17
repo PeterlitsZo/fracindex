@@ -4,7 +4,11 @@
 //! without renumbering the rest of the sequence. Its byte representation preserves
 //! the same ordering as the index itself.
 
-use std::fmt::Debug;
+use std::{
+    borrow::Cow,
+    error::Error,
+    fmt::{Debug, Display},
+};
 
 use smallvec::{SmallVec, smallvec};
 
@@ -24,6 +28,61 @@ pub enum FracindexPolicy {
     /// prepends.
     #[default]
     Sequential,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RebalancePolicy {
+    #[default]
+    PreserveBoth,
+    PreserveFirst,
+    PreserveLast,
+    ReplaceAll,
+}
+
+pub struct FracindexError {
+    pub kind: FracindexErrorKind,
+    pub message: String,
+}
+
+impl Debug for FracindexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.kind, self.message)
+    }
+}
+
+impl Display for FracindexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Error for FracindexError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
+}
+
+impl FracindexError {
+    fn new<M>(kind: FracindexErrorKind, message: M) -> Self
+    where
+        M: Display,
+    {
+        Self {
+            kind,
+            message: message.to_string(),
+        }
+    }
+
+    pub fn kind(&self) -> FracindexErrorKind {
+        self.kind
+    }
+}
+
+pub type FracindexResult<T> = Result<T, FracindexError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FracindexErrorKind {
+    Invalid,
 }
 
 /// A variable-length fractional index used to order values without renumbering
@@ -62,11 +121,14 @@ impl Fracindex {
     /// An incomplete final four-byte component is padded with zero bytes. The
     /// decoded value is normalized by removing trailing zero components.
     ///
-    /// Returns [`None`] when `bytes` is empty or contains no non-zero component.
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    /// Returns [`Err`] when `bytes` is empty or contains no non-zero component.
+    pub fn from_bytes(bytes: &[u8]) -> FracindexResult<Self> {
         if bytes.is_empty() {
             // Empty bytes cannot represent a valid fracindex.
-            return None;
+            return Err(FracindexError::new(
+                FracindexErrorKind::Invalid,
+                "bytes must not be empty",
+            ));
         }
 
         let inner_len = bytes.len().div_ceil(BYTES_CNT);
@@ -89,38 +151,69 @@ impl Fracindex {
 
         // Check if it is not empty.
         if inner.is_empty() {
-            return None;
+            return Err(FracindexError::new(
+                FracindexErrorKind::Invalid,
+                "decoded bytes must not be empty",
+            ));
         }
 
-        Some(Self { inner })
+        Ok(Self { inner })
     }
 
     /// Decodes a fractional index from an unprefixed hexadecimal string.
     ///
-    /// Both lowercase and uppercase ASCII hexadecimal digits are accepted. The
-    /// input must contain an even number of digits because each pair represents
-    /// one byte. Decoded bytes use the same normalization as
-    /// [`Fracindex::from_bytes`].
+    /// Both lowercase and uppercase ASCII hexadecimal digits are accepted.
+    /// Decoded bytes use the same normalization as [`Fracindex::from_bytes`].
     ///
-    /// Returns [`None`] when `hex` is empty, has an odd length, contains a
-    /// non-hexadecimal character, or decodes to no non-zero component.
-    pub fn from_hex(hex: &str) -> Option<Self> {
-        if hex.is_empty() || hex.len() % 2 != 0 {
-            return None;
+    /// Zero padding is allowed:
+    ///
+    /// ```rust
+    /// # use fracindex::Fracindex;
+    /// assert_eq!(Fracindex::from_hex("1000 0000").unwrap(), Fracindex::from_hex("1").unwrap());
+    /// ```
+    ///
+    /// Returns [`Err`] when `hex` is empty string, contains a non-hexadecimal
+    /// character (but space is allowed), or decodes to no non-zero component.
+    pub fn from_hex(hex: &str) -> FracindexResult<Self> {
+        if hex.is_empty() {
+            return Err(FracindexError::new(
+                FracindexErrorKind::Invalid,
+                "hex string must contain digits",
+            ));
         }
 
         let decode_nibble = |digit| match digit {
-            b'0'..=b'9' => Some(digit - b'0'),
-            b'a'..=b'f' => Some(digit - b'a' + 10),
-            b'A'..=b'F' => Some(digit - b'A' + 10),
-            _ => None,
+            b'0'..=b'9' => Ok(digit - b'0'),
+            b'a'..=b'f' => Ok(digit - b'a' + 10),
+            b'A'..=b'F' => Ok(digit - b'A' + 10),
+            _ => Err(FracindexError::new(
+                FracindexErrorKind::Invalid,
+                "hex string must contain only hexadecimal digits",
+            )),
         };
 
-        let mut bytes = Vec::with_capacity(hex.len() / 2);
-        for pair in hex.as_bytes().chunks_exact(2) {
-            let high = decode_nibble(pair[0])?;
-            let low = decode_nibble(pair[1])?;
-            bytes.push(high << 4 | low);
+        let mut bytes = Vec::with_capacity(
+            hex.as_bytes()
+                .iter()
+                .filter(|c| !c.is_ascii_whitespace())
+                .count()
+                / 2,
+        );
+        let mut i = 0;
+        for hex in hex.as_bytes().iter() {
+            // Skip whitespace characters.
+            if hex.is_ascii_whitespace() {
+                continue;
+            }
+
+            let num = decode_nibble(*hex)?;
+            if i % 2 == 0 {
+                bytes.push(num << 4);
+            } else {
+                bytes[i / 2] |= num;
+            }
+
+            i += 1;
         }
 
         Self::from_bytes(&bytes)
@@ -227,9 +320,9 @@ impl Fracindex {
 
     /// Creates an index that sorts strictly between `a` and `b`.
     ///
-    /// Returns [`None`] when the bounds are equal, reversed, or do not admit a
+    /// Returns [`Err`] when the bounds are equal, reversed, or do not admit a
     /// valid fractional index between them.
-    pub fn new_between(a: &Self, b: &Self) -> Option<Self> {
+    pub fn new_between(a: &Self, b: &Self) -> FracindexResult<Self> {
         let a_len = a.inner.len();
         let b_len = b.inner.len();
         let min_len = a_len.min(b_len);
@@ -238,7 +331,10 @@ impl Fracindex {
             // Handle a zero component in `b` separately to avoid underflow.
             if b.inner[i] == MIN {
                 if a.inner[i] != MIN {
-                    return None;
+                    return Err(FracindexError::new(
+                        FracindexErrorKind::Invalid,
+                        "a is not before b",
+                    ));
                 }
                 continue;
             }
@@ -246,7 +342,7 @@ impl Fracindex {
             if a.inner[i] < b.inner[i] - 1 {
                 let mut inner = SmallVec::from_slice(&a.inner[..=i]);
                 inner[i] = a.inner[i] + (b.inner[i] - a.inner[i]) / 2;
-                return Some(Self { inner });
+                return Ok(Self { inner });
             }
 
             if a.inner[i] == b.inner[i] - 1 {
@@ -257,24 +353,30 @@ impl Fracindex {
                     let distance = MAX - value;
                     let mut inner = SmallVec::from_slice(&a.inner[..=ai]);
                     inner[ai] = value + distance / 2 + distance % 2;
-                    return Some(Self { inner });
+                    return Ok(Self { inner });
                 }
 
                 let mut inner = SmallVec::with_capacity(a_len + 1);
                 inner.extend_from_slice(&a.inner);
                 inner.push(DEFAULT);
-                return Some(Self { inner });
+                return Ok(Self { inner });
             }
 
             if a.inner[i] > b.inner[i] {
-                return None;
+                return Err(FracindexError::new(
+                    FracindexErrorKind::Invalid,
+                    "a is not before b",
+                ));
             }
         }
 
         // Equal values have no midpoint, and a longer `a` with the same prefix
         // is ordered after `b`.
         if a_len != min_len || b_len == min_len {
-            return None;
+            return Err(FracindexError::new(
+                FracindexErrorKind::Invalid,
+                "a is not before b",
+            ));
         }
 
         // `a` is a strict prefix of `b`. Move the final component of `b`
@@ -287,7 +389,7 @@ impl Fracindex {
             inner[b_len - 1] = MIN;
             inner.push(DEFAULT);
         }
-        Some(Self { inner })
+        Ok(Self { inner })
     }
 
     /// Encodes this index as canonical big-endian bytes.
@@ -303,6 +405,18 @@ impl Fracindex {
             bytes.pop();
         }
         bytes
+    }
+
+    /// The bytes length returned by [`Fracindex::to_bytes`]. Cheaper than calling
+    /// [`Fracindex::to_bytes`] and checking its length.
+    pub fn bytes_len(&self) -> usize {
+        self.inner.len() * BYTES_CNT
+            - self
+                .inner
+                .last()
+                .expect("a fractional index must contain at least one component")
+                .trailing_zeros() as usize
+                / 8
     }
 
     /// Formats the canonical byte representation as lowercase hexadecimal
@@ -330,6 +444,187 @@ impl Fracindex {
         }
 
         hex
+    }
+
+    /// Rebalances the fracindexes slice.
+    ///
+    /// The slice MUST be sorted in ascending order. If the slice is not sorted,
+    /// the result is undefined. We do not check it.
+    pub fn rebalance(slice: &[Self], policy: RebalancePolicy) -> FracindexResult<Cow<'_, [Self]>> {
+        Self::rebalance_with_policy(slice, policy, FracindexPolicy::default())
+    }
+
+    /// Rebalances the fracindexes slice.
+    ///
+    /// The slice MUST be sorted in ascending order. If the slice is not sorted,
+    /// the result is undefined. We do not check it.
+    pub fn rebalance_with_policy(
+        slice: &[Self],
+        rp: RebalancePolicy,
+        fp: FracindexPolicy,
+    ) -> FracindexResult<Cow<'_, [Self]>> {
+        fn rebalance_in_range(
+            sink: &mut [Fracindex],
+            start: usize,
+            end: usize,
+            first: &Fracindex,
+            last: &Fracindex,
+        ) -> FracindexResult<()> {
+            if end <= start {
+                return Ok(());
+            }
+            if end - start == 1 {
+                sink[start] = Fracindex::new_between(first, last)?;
+                return Ok(());
+            }
+
+            let mid = (start + end) / 2;
+            let mid_val = Fracindex::new_between(first, last)?;
+            sink[mid] = mid_val.clone();
+            rebalance_in_range(sink, start, mid, first, &mid_val)?;
+            rebalance_in_range(sink, mid + 1, end, &mid_val, last)?;
+
+            Ok(())
+        }
+
+        fn rebalance_after_part_random(
+            sink: &mut [Fracindex],
+            start: usize,
+            end: usize,
+            first: &Fracindex,
+        ) -> FracindexResult<()> {
+            if end <= start {
+                return Ok(());
+            }
+            if end - start == 1 {
+                sink[start] = Fracindex::new_after_with_policy(first, FracindexPolicy::Random);
+                return Ok(());
+            }
+
+            let mid = (start + end) / 2;
+            let mid_val = Fracindex::new_after_with_policy(first, FracindexPolicy::Random);
+            sink[mid] = mid_val.clone();
+            rebalance_in_range(sink, start, mid, first, &mid_val)?;
+            rebalance_after_part_random(sink, mid + 1, end, &mid_val)?;
+
+            Ok(())
+        }
+
+        fn rebalance_before_part_random(
+            sink: &mut [Fracindex],
+            start: usize,
+            end: usize,
+            last: &Fracindex,
+        ) -> FracindexResult<()> {
+            if end <= start {
+                return Ok(());
+            }
+            if end - start == 1 {
+                sink[start] = Fracindex::new_before_with_policy(last, FracindexPolicy::Random);
+                return Ok(());
+            }
+
+            let mid = (start + end) / 2;
+            let mid_val = Fracindex::new_before_with_policy(last, FracindexPolicy::Random);
+            sink[mid] = mid_val.clone();
+            rebalance_in_range(sink, mid + 1, end, &mid_val, last)?;
+            rebalance_before_part_random(sink, start, mid, &mid_val)?;
+
+            Ok(())
+        }
+
+        let len = slice.len();
+
+        // Fast path: for some case, we can return the slice as-is.
+        match rp {
+            RebalancePolicy::PreserveBoth => {
+                if len <= 2 {
+                    return Ok(Cow::Borrowed(slice));
+                }
+            }
+            RebalancePolicy::PreserveFirst | RebalancePolicy::PreserveLast => {
+                if len <= 1 {
+                    return Ok(Cow::Borrowed(slice));
+                }
+            }
+            RebalancePolicy::ReplaceAll => {
+                if len == 0 {
+                    return Ok(Cow::Borrowed(slice));
+                }
+            }
+        }
+
+        let mut result = vec![Self::default(); len];
+
+        match rp {
+            RebalancePolicy::PreserveBoth => {
+                result[0] = slice[0].clone();
+                result[len - 1] = slice[len - 1].clone();
+                rebalance_in_range(&mut result, 1, len - 1, &slice[0], &slice[len - 1])?;
+                Ok(Cow::Owned(result))
+            }
+            RebalancePolicy::PreserveFirst => {
+                result[0] = slice[0].clone();
+
+                match fp {
+                    FracindexPolicy::Sequential => {
+                        for i in 1..len {
+                            result[i] = Fracindex::new_after_with_policy(&result[i - 1], fp);
+                        }
+                    }
+                    FracindexPolicy::Random => {
+                        rebalance_after_part_random(&mut result, 1, len, &slice[0])?;
+                    }
+                }
+
+                Ok(Cow::Owned(result))
+            }
+            RebalancePolicy::PreserveLast => {
+                result[len - 1] = slice[len - 1].clone();
+
+                match fp {
+                    FracindexPolicy::Sequential => {
+                        for i in 1..len {
+                            let j = len - 1 - i;
+                            result[j] = Fracindex::new_before_with_policy(&result[j + 1], fp);
+                        }
+                    }
+                    FracindexPolicy::Random => {
+                        rebalance_before_part_random(&mut result, 0, len - 1, &slice[len - 1])?;
+                    }
+                }
+
+                Ok(Cow::Owned(result))
+            }
+            RebalancePolicy::ReplaceAll => {
+                let mid = len / 2;
+                result[mid] = Fracindex::default();
+
+                match fp {
+                    FracindexPolicy::Sequential => {
+                        for i in 0..mid {
+                            let j = mid - 1 - i;
+                            result[j] = Fracindex::new_before_with_policy(&result[j + 1], fp);
+                        }
+                        for i in 0..len - mid - 1 {
+                            let j = mid + 1 + i;
+                            result[j] = Fracindex::new_after_with_policy(&result[j - 1], fp);
+                        }
+                    }
+                    FracindexPolicy::Random => {
+                        rebalance_before_part_random(&mut result, 0, mid, &Fracindex::default())?;
+                        rebalance_after_part_random(
+                            &mut result,
+                            mid + 1,
+                            len,
+                            &Fracindex::default(),
+                        )?;
+                    }
+                }
+
+                Ok(Cow::Owned(result))
+            }
+        }
     }
 }
 
@@ -431,8 +726,8 @@ mod tests {
 
     #[test]
     fn test_from_bytes_rejects_empty_or_zero_and_removes_trailing_zero_words() {
-        assert!(Fracindex::from_bytes(&[]).is_none());
-        assert!(Fracindex::from_bytes(&[0; BYTES_CNT]).is_none());
+        assert!(Fracindex::from_bytes(&[]).is_err());
+        assert!(Fracindex::from_bytes(&[0; BYTES_CNT]).is_err());
 
         let encoded = bytes(&[GAP, MIN]);
         let fracindex = Fracindex::from_bytes(&encoded).unwrap();
@@ -465,7 +760,7 @@ mod tests {
 
         for expected in indexes {
             let hex = expected.to_hex();
-            assert_eq!(Fracindex::from_hex(&hex), Some(expected));
+            assert_eq!(Fracindex::from_hex(&hex).unwrap(), expected);
         }
 
         let normalized = Fracindex::from_hex("0000010000000000").unwrap();
@@ -474,10 +769,10 @@ mod tests {
     }
 
     #[test]
-    fn test_from_hex_rejects_empty_odd_invalid_prefixed_and_zero_inputs() {
-        for invalid in ["", "0", "123", "gg", "0x12", "１２", "00", "00000000"] {
+    fn test_from_hex_rejects_invalid_inputs() {
+        for invalid in ["", "0", "gg", "0x12", "１２", "00", "00000000"] {
             assert!(
-                Fracindex::from_hex(invalid).is_none(),
+                Fracindex::from_hex(invalid).is_err(),
                 "input should be rejected: {invalid:?}"
             );
         }
@@ -651,11 +946,11 @@ mod tests {
             let result = Fracindex::new_between(&a, &b);
 
             match (result, test_case.expected) {
-                (Some(result), Some(expected)) => {
+                (Ok(result), Some(expected)) => {
                     assert_words(&result, expected);
                     assert!(a < result && result < b, "iteration {i}");
                 }
-                (None, None) => {}
+                (Err(_), None) => {}
                 _ => panic!("unexpected result at iteration {i}"),
             }
         }
@@ -711,7 +1006,7 @@ mod tests {
             (anchor.as_ref(), right.as_ref())
         };
         let index = Fracindex::new_between(left, right)
-            .unwrap_or_else(|| panic!("iteration {iteration}, no index between adjacent orders"));
+            .expect("iteration {iteration}, no index between adjacent orders");
         assert!(
             left < &index && &index < right,
             "iteration {iteration}, invalid index between adjacent orders"
@@ -825,6 +1120,225 @@ mod tests {
     fn test_sequential_policy_insertions_stay_strictly_ordered() {
         for _i in 1..10 {
             assert_random_insertions_stay_strictly_ordered(|| FracindexPolicy::Sequential);
+        }
+    }
+
+    #[test]
+    fn test_rebalance() {
+        struct TestCase {
+            index: usize,
+            expected: &'static str,
+        }
+        macro_rules! test_case {
+            ($index:literal => $expected:literal) => {
+                TestCase {
+                    index: $index,
+                    expected: $expected,
+                }
+            };
+        }
+
+        let first = Fracindex::default();
+        let mut source_btree = BTreeSet::new();
+        source_btree.insert(first.clone());
+
+        // Very bad case: Construct an interval with very high density.
+        let mut tmp = Fracindex::new_after(&first);
+        for _ in 0..1023 {
+            source_btree.insert(tmp.clone());
+            tmp = Fracindex::new_between(&first, &tmp).unwrap();
+        }
+
+        // Some Fracindex object needs many bytes to encode...
+        let source = source_btree.into_iter().collect::<Vec<_>>();
+        let max_bytes_len = source.iter().map(|i| i.bytes_len()).max().unwrap();
+        assert_eq!(max_bytes_len, 136);
+
+        // ...But we can rebalance the source.
+        let result = Fracindex::rebalance(source.as_slice(), RebalancePolicy::PreserveBoth)
+            .unwrap()
+            .into_owned();
+        let first = Fracindex::default();
+        let last = Fracindex::new_after(&first);
+        assert_eq!(result.len(), 1024);
+        assert_eq!(result.first(), Some(&first));
+        assert_eq!(result.last(), Some(&last));
+
+        // After rebalancing, the max bytes we need is decreased a lot!
+        let max_bytes_len = result.iter().map(|i| i.bytes_len()).max().unwrap();
+        assert_eq!(max_bytes_len, 8);
+
+        // Check the result.
+        for i in 1..1024 {
+            assert!(result[i - 1] < result[i]);
+        }
+        let test_cases = [
+            test_case! { 0 => "7fff ffff 0000 0000" },
+            test_case! { 1 => "7fff ffff 3fff ffff" },
+            test_case! { 2 => "7fff ffff 7fff ffff" },
+            test_case! { 3 => "7fff ffff bfff ffff" },
+            test_case! { 4 => "8000 0000 0000 0000" },
+            test_case! { 5 => "8000 0000 3fff ffff" },
+            test_case! { 6 => "8000 0000 7fff ffff" },
+            test_case! { 7 => "8000 0000 bfff ffff" },
+            test_case! { 8 => "8000 0001 0000 0000" },
+            test_case! { 9 => "8000 0001 3fff ffff" },
+            test_case! { 510 => "8000 007e 7fff ffff" },
+            test_case! { 511 => "8000 007e bfff ffff" },
+            test_case! { 512 => "8000 007f 0000 0000" },
+            test_case! { 513 => "8000 007f 3fff ffff" },
+            test_case! { 514 => "8000 007f 7fff ffff" },
+            test_case! { 1021 => "8000 00fe 3fff ffff" },
+            test_case! { 1022 => "8000 00fe 7fff ffff" },
+            test_case! { 1023 => "8000 00ff 0000 0000" },
+        ];
+        for test_case in test_cases {
+            let expected = Fracindex::from_hex(test_case.expected).unwrap();
+            assert_eq!(
+                result[test_case.index], expected,
+                "Expected {:?} but got {:?} for index {}",
+                expected, result[test_case.index], test_case.index
+            );
+        }
+
+        // If we do not care the first and last values, we can use another
+        // policy to rebalance.
+        let result = Fracindex::rebalance(source.as_slice(), RebalancePolicy::ReplaceAll).unwrap();
+        let max_bytes_len = result.iter().map(|i| i.bytes_len()).max().unwrap();
+        assert_eq!(max_bytes_len, 4);
+        for i in 1..1024 {
+            assert!(result[i - 1] < result[i]);
+        }
+        let test_cases = [
+            test_case! { 0 => "7ffd ffff" },
+            test_case! { 1 => "7ffe 00ff" },
+            test_case! { 2 => "7ffe 01ff" },
+            test_case! { 509 => "7fff fcff" },
+            test_case! { 510 => "7fff fdff" },
+            test_case! { 511 => "7fff feff" },
+            test_case! { 512 => "7fff ffff" },
+            test_case! { 513 => "8000 00ff" },
+            test_case! { 514 => "8000 01ff" },
+            test_case! { 515 => "8000 02ff" },
+            test_case! { 1021 => "8001 fcff" },
+            test_case! { 1022 => "8001 fdff" },
+            test_case! { 1023 => "8001 feff" },
+        ];
+        for test_case in test_cases {
+            let expected = Fracindex::from_hex(test_case.expected).unwrap();
+            assert_eq!(
+                result[test_case.index], expected,
+                "Expected {:?} but got {:?} for index {}",
+                expected, result[test_case.index], test_case.index
+            );
+        }
+
+        // We can also rebalance with the other 2 policies.
+        let result =
+            Fracindex::rebalance(source.as_slice(), RebalancePolicy::PreserveFirst).unwrap();
+        let max_bytes_len = result.iter().map(|i| i.bytes_len()).max().unwrap();
+        assert_eq!(max_bytes_len, 4);
+        for i in 1..1024 {
+            assert!(result[i - 1] < result[i]);
+        }
+        let test_cases = [
+            test_case! { 0 => "7fff ffff" },
+            test_case! { 1 => "8000 00ff" },
+            test_case! { 2 => "8000 01ff" },
+            test_case! { 3 => "8000 02ff" },
+            test_case! { 4 => "8000 03ff" },
+            test_case! { 1023 => "8003 feff" },
+        ];
+        for test_case in test_cases {
+            let expected = Fracindex::from_hex(test_case.expected).unwrap();
+            assert_eq!(
+                result[test_case.index], expected,
+                "Expected {:?} but got {:?} for index {}",
+                expected, result[test_case.index], test_case.index
+            );
+        }
+
+        let result =
+            Fracindex::rebalance(source.as_slice(), RebalancePolicy::PreserveLast).unwrap();
+        let max_bytes_len = result.iter().map(|i| i.bytes_len()).max().unwrap();
+        assert_eq!(max_bytes_len, 4);
+        for i in 1..1024 {
+            assert!(result[i - 1] < result[i]);
+        }
+        let test_cases = [
+            test_case! { 0 => "7ffc 01ff" },
+            test_case! { 1019 => "7fff fcff" },
+            test_case! { 1020 => "7fff fdff" },
+            test_case! { 1021 => "7fff feff" },
+            test_case! { 1022 => "7fff ffff" },
+            test_case! { 1023 => "8000 00ff" },
+        ];
+        for test_case in test_cases {
+            let expected = Fracindex::from_hex(test_case.expected).unwrap();
+            assert_eq!(
+                result[test_case.index], expected,
+                "Expected {:?} but got {:?} for index {}",
+                expected, result[test_case.index], test_case.index
+            );
+        }
+
+        // We can also use the different FracindexPolicy.
+        let result = Fracindex::rebalance_with_policy(
+            source.as_slice(),
+            RebalancePolicy::PreserveFirst,
+            FracindexPolicy::Random,
+        )
+        .unwrap();
+        let max_bytes_len = result.iter().map(|i| i.bytes_len()).max().unwrap();
+        assert_eq!(max_bytes_len, 4);
+        for i in 1..1024 {
+            assert!(result[i - 1] < result[i]);
+        }
+        let test_cases = [
+            test_case! { 0 => "7fff ffff" },
+            test_case! { 1 => "801f ffff" },
+            test_case! { 2 => "803f ffff" },
+            test_case! { 3 => "805f ffff" },
+            test_case! { 4 => "807f ffff" },
+            test_case! { 1022 => "ffbf ffff" },
+            test_case! { 1023 => "ffdf ffff" },
+        ];
+        for test_case in test_cases {
+            let expected = Fracindex::from_hex(test_case.expected).unwrap();
+            assert_eq!(
+                result[test_case.index], expected,
+                "Expected {:?} but got {:?} for index {}",
+                expected, result[test_case.index], test_case.index
+            );
+        }
+
+        let result = Fracindex::rebalance_with_policy(
+            source.as_slice(),
+            RebalancePolicy::PreserveLast,
+            FracindexPolicy::Random,
+        )
+        .unwrap();
+        let max_bytes_len = result.iter().map(|i| i.bytes_len()).max().unwrap();
+        assert_eq!(max_bytes_len, 4);
+        for i in 1..1024 {
+            assert!(result[i - 1] < result[i]);
+        }
+        let test_cases = [
+            test_case! { 0 => "0020 0000" },
+            test_case! { 1 => "0040 0000" },
+            test_case! { 1019 => "7f80 00fe" },
+            test_case! { 1020 => "7fa0 00fe" },
+            test_case! { 1021 => "7fc0 00fe" },
+            test_case! { 1022 => "7fe0 00fe" },
+            test_case! { 1023 => "8000 00ff" },
+        ];
+        for test_case in test_cases {
+            let expected = Fracindex::from_hex(test_case.expected).unwrap();
+            assert_eq!(
+                result[test_case.index], expected,
+                "Expected {:?} but got {:?} for index {}",
+                expected, result[test_case.index], test_case.index
+            );
         }
     }
 }
