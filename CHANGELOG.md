@@ -2,7 +2,7 @@
 
 Please follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## v0.2.0 (2026-08-17)
 
 ### Added
 
@@ -14,7 +14,7 @@ Please follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- Change `Fracindex::from_bytes`, `Fracindex::from_hex`, and
+- \[BREAKING] Change `Fracindex::from_bytes`, `Fracindex::from_hex`, and
   `Fracindex::new_between` to return `FracindexResult` with error details.
 
 ## v0.1.0 (2026-07-30)
