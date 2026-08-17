@@ -2,6 +2,14 @@
 
 Please follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- Fix the bad batch creation methods for `Fracindex`. The original name
+  `new_before_batch` is changed to `batch_new_before`. The original name
+  `new_after_batch` is changed to `batch_new_after`.
+
 ## v0.3.0 (2026-08-17)
 
 ### Added

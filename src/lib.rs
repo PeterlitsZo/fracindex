@@ -271,7 +271,7 @@ impl Fracindex {
     /// Batch creates `count` indices that sort after `other`.
     ///
     /// The returned indices are sorted in ascending order.
-    pub fn new_after_batch(other: &Self, count: usize) -> Vec<Self> {
+    pub fn batch_new_after(other: &Self, count: usize) -> Vec<Self> {
         let mut result = Vec::with_capacity(count);
         let mut tmp = Self::new_after(other);
         for _ in 0..count {
@@ -335,7 +335,7 @@ impl Fracindex {
     /// Batch creates `count` indices that sort before `other`.
     ///
     /// The returned indices are sorted in ascending order.
-    pub fn new_before_batch(other: &Self, count: usize) -> Vec<Self> {
+    pub fn batch_new_before(other: &Self, count: usize) -> Vec<Self> {
         let mut result = Vec::with_capacity(count);
         let mut tmp = Self::new_before(other);
         for _ in 0..count {
