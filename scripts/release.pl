@@ -26,9 +26,10 @@ sub write_file {
 
 # Print the step message.
 my $current_step = 1;
+my $total_steps = 6;
 sub print_step_message {
     my ($message) = @_;
-    print color('cyan') . "\n[$current_step/7] $message\n" . color('reset');
+    print color('cyan') . "\n[$current_step/$total_steps] $message\n" . color('reset');
     $current_step++;
 }
 
@@ -79,6 +80,18 @@ my $toml = read_file($toml_filename);
 $toml =~ s/^version = ".*"/version = "$version"/m;
 write_file($toml_filename, $toml);
 print color('green') . "      Updated version to $version\n" . color('reset');
+
+# Update README.md.
+my $readme_filename = 'README.md';
+print_step_message("Updating $readme_filename...");
+my $readme = read_file($readme_filename);
+my $readme_replacements = 0;
+$readme_replacements += ($readme =~ s/(fracindex = ")\d+\.\d+\.\d+(")/$1$version$2/g);
+$readme_replacements += ($readme =~ s/(fracindex = \{[^}\n]*\bversion = ")\d+\.\d+\.\d+(")/$1$version$2/g);
+die color('red') . "      Error: No fracindex dependency version found in $readme_filename\n" . color('reset')
+    if $readme_replacements == 0;
+write_file($readme_filename, $readme);
+print color('green') . "      Updated $readme_replacements README version reference(s) to $version\n" . color('reset');
 
 # Update Cargo.lock.
 print_step_message("Updating Cargo.lock...");

@@ -13,7 +13,7 @@ information.
 To use `fracindex`, add it to your `Cargo.toml` dependencies:
 
 ```toml
-fracindex = "0.3.1"
+fracindex = "0.4.1"
 ```
 
 You can create a new `Fracindex` and calculate a new `Fracindex` using existing
@@ -33,20 +33,18 @@ assert!(first < middle);
 assert!(middle < second);
 ```
 
-We have many methods:
+We can use `builder()` to get the builder, and it has many methods:
 
-- `builder().after(...).build()`. Create a `Fracindex` that is after a given
-  `Fracindex`.
-- `builder().before(...).build()`. Create a `Fracindex` that is before a given
-  `Fracindex`.
-- `builder().between(..., ...).build()`. Create a `Fracindex` that is between
-  two given `Fracindex` values.
-- `builder().after(...).batch_build(count)`. Create a batch of `Fracindex`
-  values that are after a given `Fracindex`.
-- `builder().before(...).batch_build(count)`. Create a batch of `Fracindex`
-  values that are before a given `Fracindex`.
-- `builder().between(..., ...).batch_build(count)`. Create a batch of
-  `Fracindex` values that are between two given `Fracindex` values.
+- Methods with another `Fracindex` as an argument:
+  - `after(other)`. Create a `Fracindex` that is after a given `Fracindex`.
+  - `before(other)`. Create a `Fracindex` that is before a given `Fracindex`.
+  - `between(a, b)`. Create a `Fracindex` that is between two given `Fracindex`
+    values.
+- Methods to build a `Fracindex` or a vector of `Fracindex` values:
+  - `build()`. Create a `Fracindex` value.
+  - `batch_build(count)`. Create a batch of `Fracindex` values.
+- Methods to define the policy:
+  - `space_policy(policy)`. Set the space policy for the builder.
 
 Use `.space_policy(SpacePolicy::Random)` on a builder to allocate midpoint-like
 space near open bounds. The default is `SpacePolicy::Sequential`, which is
@@ -71,7 +69,7 @@ Enable the `jitter` feature when multiple writers may create indexes near the
 same bounds and you want a randomized tail after the usual deterministic index:
 
 ```toml
-fracindex = { version = "0.3.1", features = ["jitter"] }
+fracindex = { version = "0.4.1", features = ["jitter"] }
 rand = "0.10.2"
 ```
 

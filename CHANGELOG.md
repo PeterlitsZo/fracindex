@@ -2,6 +2,10 @@
 
 Please follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.4.1 (2026-09-09)
+
+Just update the document.
+
 ## v0.4.0 (2026-09-09)
 
 ### Added
