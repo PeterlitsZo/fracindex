@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use fracindex::Fracindex;
+use fracindex::{Fracindex, SpacePolicy};
 use fractional_index::FractionalIndex;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::{hint::black_box, time::Duration};
@@ -12,15 +12,15 @@ const RANDOM_WORKLOAD_SEED: u64 = 0xF12A_C710_1D3E_5EED;
 
 trait BenchIndex: Ord + Sized {
     fn initial() -> Self;
-    fn new_before(other: &Self) -> Self;
-    fn new_after(other: &Self) -> Self;
-    fn new_between(left: &Self, right: &Self) -> Self;
+    fn before_index(other: &Self) -> Self;
+    fn after_index(other: &Self) -> Self;
+    fn between_indexes(left: &Self, right: &Self) -> Self;
     fn byte_len(&self) -> usize;
-    fn new_before_prefer_random(other: &Self) -> Self {
-        Self::new_before(other)
+    fn before_index_prefer_random(other: &Self) -> Self {
+        Self::before_index(other)
     }
-    fn new_after_prefer_random(other: &Self) -> Self {
-        Self::new_after(other)
+    fn after_index_prefer_random(other: &Self) -> Self {
+        Self::after_index(other)
     }
 }
 
@@ -29,28 +29,36 @@ impl BenchIndex for Fracindex {
         Self::default()
     }
 
-    fn new_before(other: &Self) -> Self {
-        Self::new_before(other)
+    fn before_index(other: &Self) -> Self {
+        Self::builder().before(other).build().unwrap()
     }
 
-    fn new_after(other: &Self) -> Self {
-        Self::new_after(other)
+    fn after_index(other: &Self) -> Self {
+        Self::builder().after(other).build().unwrap()
     }
 
-    fn new_between(left: &Self, right: &Self) -> Self {
-        Self::new_between(left, right).unwrap()
+    fn between_indexes(left: &Self, right: &Self) -> Self {
+        Self::builder().between(left, right).build().unwrap()
     }
 
     fn byte_len(&self) -> usize {
         self.to_bytes().len()
     }
 
-    fn new_before_prefer_random(other: &Self) -> Self {
-        Self::new_before_with_policy(other, fracindex::FracindexPolicy::Random)
+    fn before_index_prefer_random(other: &Self) -> Self {
+        Self::builder()
+            .before(other)
+            .space_policy(SpacePolicy::Random)
+            .build()
+            .unwrap()
     }
 
-    fn new_after_prefer_random(other: &Self) -> Self {
-        Self::new_after_with_policy(other, fracindex::FracindexPolicy::Random)
+    fn after_index_prefer_random(other: &Self) -> Self {
+        Self::builder()
+            .after(other)
+            .space_policy(SpacePolicy::Random)
+            .build()
+            .unwrap()
     }
 }
 
@@ -59,15 +67,15 @@ impl BenchIndex for FractionalIndex {
         Self::default()
     }
 
-    fn new_before(other: &Self) -> Self {
+    fn before_index(other: &Self) -> Self {
         Self::new_before(other)
     }
 
-    fn new_after(other: &Self) -> Self {
+    fn after_index(other: &Self) -> Self {
         Self::new_after(other)
     }
 
-    fn new_between(left: &Self, right: &Self) -> Self {
+    fn between_indexes(left: &Self, right: &Self) -> Self {
         Self::new_between(left, right).unwrap()
     }
 
@@ -78,9 +86,9 @@ impl BenchIndex for FractionalIndex {
 
 fn validate_adapter<T: BenchIndex>() {
     let index = T::initial();
-    let before = T::new_before(&index);
-    let after = T::new_after(&index);
-    let between = T::new_between(&index, &after);
+    let before = T::before_index(&index);
+    let after = T::after_index(&index);
+    let between = T::between_indexes(&index, &after);
 
     assert!(before < index);
     assert!(index < between);
@@ -90,7 +98,7 @@ fn validate_adapter<T: BenchIndex>() {
 fn grow_before<T: BenchIndex>(target_len: usize) -> T {
     let mut index = T::initial();
     while index.byte_len() < target_len {
-        index = T::new_before(&index);
+        index = T::before_index(&index);
     }
     index
 }
@@ -98,7 +106,7 @@ fn grow_before<T: BenchIndex>(target_len: usize) -> T {
 fn grow_after<T: BenchIndex>(target_len: usize) -> T {
     let mut index = T::initial();
     while index.byte_len() < target_len {
-        index = T::new_after(&index);
+        index = T::after_index(&index);
     }
     index
 }
@@ -106,7 +114,11 @@ fn grow_after<T: BenchIndex>(target_len: usize) -> T {
 fn grow_fracindex_before(target_len: usize) -> Fracindex {
     let mut index = Fracindex::default();
     while index.to_bytes().len() < target_len {
-        index = Fracindex::new_before_with_policy(&index, fracindex::FracindexPolicy::Random);
+        index = Fracindex::builder()
+            .before(&index)
+            .space_policy(SpacePolicy::Random)
+            .build()
+            .unwrap();
     }
     index
 }
@@ -114,17 +126,21 @@ fn grow_fracindex_before(target_len: usize) -> Fracindex {
 fn grow_fracindex_after(target_len: usize) -> Fracindex {
     let mut index = Fracindex::default();
     while index.to_bytes().len() < target_len {
-        index = Fracindex::new_after_with_policy(&index, fracindex::FracindexPolicy::Random);
+        index = Fracindex::builder()
+            .after(&index)
+            .space_policy(SpacePolicy::Random)
+            .build()
+            .unwrap();
     }
     index
 }
 
 fn grow_between<T: BenchIndex>(target_len: usize) -> (T, T) {
     let left = T::initial();
-    let mut right = T::new_after(&left);
+    let mut right = T::after_index(&left);
 
     while left.byte_len().max(right.byte_len()) < target_len {
-        right = T::new_between(&left, &right);
+        right = T::between_indexes(&left, &right);
     }
 
     assert!(left < right);
@@ -134,7 +150,7 @@ fn grow_between<T: BenchIndex>(target_len: usize) -> (T, T) {
 fn append_workload<T: BenchIndex>(count: u64) -> T {
     let mut index = T::initial();
     for _ in 0..count {
-        index = T::new_after(&index);
+        index = T::after_index(&index);
     }
     index
 }
@@ -142,17 +158,17 @@ fn append_workload<T: BenchIndex>(count: u64) -> T {
 fn prepend_workload<T: BenchIndex>(count: u64) -> T {
     let mut index = T::initial();
     for _ in 0..count {
-        index = T::new_before(&index);
+        index = T::before_index(&index);
     }
     index
 }
 
 fn dense_between_workload<T: BenchIndex>(count: u64) -> T {
     let left = T::initial();
-    let mut right = T::new_after(&left);
+    let mut right = T::after_index(&left);
 
     for _ in 0..count {
-        right = T::new_between(&left, &right);
+        right = T::between_indexes(&left, &right);
     }
 
     right
@@ -187,9 +203,9 @@ fn random_insert_workload<T: BenchIndex, const VALIDATE: bool>(
     for (iteration, &choice) in choices.iter().enumerate() {
         let (left, right) = gaps[choice];
         let index = match (left, right) {
-            (None, Some(right)) => T::new_before_prefer_random(&indexes[right]),
-            (Some(left), None) => T::new_after_prefer_random(&indexes[left]),
-            (Some(left), Some(right)) => T::new_between(&indexes[left], &indexes[right]),
+            (None, Some(right)) => T::before_index_prefer_random(&indexes[right]),
+            (Some(left), None) => T::after_index_prefer_random(&indexes[left]),
+            (Some(left), Some(right)) => T::between_indexes(&indexes[left], &indexes[right]),
             (None, None) => unreachable!("a gap must have at least one bound"),
         };
 
@@ -239,7 +255,7 @@ fn benchmark_default(c: &mut Criterion) {
 }
 
 fn benchmark_before(c: &mut Criterion) {
-    let mut group = c.benchmark_group("operations/new_before");
+    let mut group = c.benchmark_group("operations/builder_before");
 
     for (label, target_len) in KEY_SIZES {
         let fracindex = grow_fracindex_before(target_len);
@@ -248,7 +264,16 @@ fn benchmark_before(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("fracindex", label),
             &fracindex,
-            |b, index| b.iter(|| black_box(Fracindex::new_before(black_box(index)))),
+            |b, index| {
+                b.iter(|| {
+                    black_box(
+                        Fracindex::builder()
+                            .before(black_box(index))
+                            .build()
+                            .unwrap(),
+                    )
+                })
+            },
         );
         group.bench_with_input(
             BenchmarkId::new("fractional_index", label),
@@ -261,7 +286,7 @@ fn benchmark_before(c: &mut Criterion) {
 }
 
 fn benchmark_after(c: &mut Criterion) {
-    let mut group = c.benchmark_group("operations/new_after");
+    let mut group = c.benchmark_group("operations/builder_after");
 
     for (label, target_len) in KEY_SIZES {
         let fracindex = grow_fracindex_after(target_len);
@@ -270,7 +295,16 @@ fn benchmark_after(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("fracindex", label),
             &fracindex,
-            |b, index| b.iter(|| black_box(Fracindex::new_after(black_box(index)))),
+            |b, index| {
+                b.iter(|| {
+                    black_box(
+                        Fracindex::builder()
+                            .after(black_box(index))
+                            .build()
+                            .unwrap(),
+                    )
+                })
+            },
         );
         group.bench_with_input(
             BenchmarkId::new("fractional_index", label),
@@ -283,7 +317,7 @@ fn benchmark_after(c: &mut Criterion) {
 }
 
 fn benchmark_between(c: &mut Criterion) {
-    let mut group = c.benchmark_group("operations/new_between");
+    let mut group = c.benchmark_group("operations/builder_between");
 
     for (label, target_len) in KEY_SIZES {
         let fracindex = grow_between::<Fracindex>(target_len);
@@ -295,7 +329,9 @@ fn benchmark_between(c: &mut Criterion) {
             |b, (left, right)| {
                 b.iter(|| {
                     black_box(
-                        Fracindex::new_between(black_box(left), black_box(right))
+                        Fracindex::builder()
+                            .between(black_box(left), black_box(right))
+                            .build()
                             .expect("fixture bounds must have a midpoint"),
                     )
                 })

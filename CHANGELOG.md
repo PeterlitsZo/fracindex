@@ -7,9 +7,13 @@ Please follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Add key-value context to `FracindexError`.
+- Add `FracindexBuilder` with `build` and `batch_build` construction methods.
 
 ### Changed
 
+- [BREAKING] Replace `FracindexPolicy` with `SpacePolicy`.
+- [BREAKING] Replace `Fracindex::new_*` and `Fracindex::batch_new_*` methods
+  with the `Fracindex::builder()` API.
 - [BREAKING] The `FracindexError` struct is now only having private fields.
 - [BREAKING] Change `Fracindex::new_between` to return the existing index when
   both bounds are equal instead of failing.

@@ -11,27 +11,11 @@ use std::{borrow::Cow, fmt::Debug};
 
 use smallvec::{SmallVec, smallvec};
 
+mod builder;
 mod error;
 
+pub use builder::*;
 pub use error::*;
-
-/// Controls how space is allocated when generating an index before or after
-/// another index.
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum FracindexPolicy {
-    /// Chooses a midpoint toward the available boundary.
-    ///
-    /// This policy leaves room for insertions whose future positions are not
-    /// expected to follow a predictable direction.
-    Random,
-    /// Moves by a fixed gap when possible and falls back to a midpoint near a
-    /// component boundary.
-    ///
-    /// This is the default policy and is suitable for repeated appends or
-    /// prepends.
-    #[default]
-    Sequential,
-}
 
 /// Controls which existing boundary indexes are preserved when rebalancing a
 /// sorted slice of [`Fracindex`] values.
@@ -94,6 +78,11 @@ impl Debug for Fracindex {
 }
 
 impl Fracindex {
+    /// Starts building a new fractional index.
+    pub fn builder<'a>() -> FracindexBuilder<'a> {
+        FracindexBuilder::default()
+    }
+
     /// Decodes a fractional index from its big-endian byte representation.
     ///
     /// An incomplete final four-byte component is padded with zero bytes. The
@@ -206,259 +195,6 @@ impl Fracindex {
         Self::from_bytes(&bytes)
     }
 
-    /// Creates an index that sorts after `other` using the default
-    /// [`FracindexPolicy::Sequential`] policy.
-    pub fn new_after(other: &Self) -> Self {
-        let policy = FracindexPolicy::default();
-        Self::new_after_with_policy(other, policy)
-    }
-
-    /// Creates an index that sorts after `other` using `policy`.
-    pub fn new_after_with_policy(other: &Self, policy: FracindexPolicy) -> Self {
-        let other_inner = &other.inner;
-        let other_len = other_inner.len();
-        // The final component must not be zero in a valid fracindex.
-        debug_assert_ne!(other_inner[other_len - 1], MIN);
-
-        for i in 0..other_inner.len() {
-            use FracindexPolicy::*;
-
-            let value = other_inner[i];
-            let get_midpoint_to_max = || {
-                let distance = MAX - value;
-                let mut inner = SmallVec::from_slice(&other_inner[..=i]);
-                inner[i] = value + distance / 2 + distance % 2;
-                Self { inner }
-            };
-            match &policy {
-                Sequential if value <= MAX - GAP * 2 => {
-                    let mut inner = SmallVec::from_slice(&other_inner[..=i]);
-                    inner[i] += GAP;
-                    return Self { inner };
-                }
-                Random if value < MAX => {
-                    return get_midpoint_to_max();
-                }
-                Sequential if value != MAX => {
-                    return get_midpoint_to_max();
-                }
-                _ => {}
-            }
-        }
-
-        let mut inner = SmallVec::with_capacity(other_len + 1);
-        inner.extend_from_slice(other_inner);
-        inner.push(match policy {
-            FracindexPolicy::Random => DEFAULT,
-            FracindexPolicy::Sequential => GAP,
-        });
-        Self { inner }
-    }
-
-    /// Batch creates `count` indices that sort after `other`.
-    ///
-    /// The returned indices are sorted in ascending order.
-    pub fn batch_new_after(other: &Self, count: usize) -> Vec<Self> {
-        let mut result = Vec::with_capacity(count);
-        let mut tmp = Self::new_after(other);
-        for _ in 0..count {
-            let next_tmp = Self::new_after(&tmp);
-            result.push(tmp);
-            tmp = next_tmp;
-        }
-        result
-    }
-
-    /// Creates an index that sorts before `other` using the default
-    /// [`FracindexPolicy::Sequential`] policy.
-    pub fn new_before(other: &Self) -> Self {
-        let policy = FracindexPolicy::default();
-        Self::new_before_with_policy(other, policy)
-    }
-
-    /// Creates an index that sorts before `other` using `policy`.
-    pub fn new_before_with_policy(other: &Self, policy: FracindexPolicy) -> Self {
-        let other_inner = &other.inner;
-        let other_len = other_inner.len();
-        // The final component must not be zero in a valid fracindex.
-        debug_assert_ne!(other_inner[other_len - 1], MIN);
-
-        for i in 0..other_inner.len() {
-            use FracindexPolicy::*;
-
-            let value = other_inner[i];
-            let get_midpoint_to_min = || {
-                let mut inner = SmallVec::from_slice(&other_inner[..=i]);
-                inner[i] /= 2;
-                Self { inner }
-            };
-            match &policy {
-                Sequential if value >= GAP * 2 => {
-                    let mut inner = SmallVec::from_slice(&other_inner[..=i]);
-                    inner[i] -= GAP;
-                    return Self { inner };
-                }
-                Random if value > 1 => {
-                    return get_midpoint_to_min();
-                }
-                Sequential if value > 1 => {
-                    return get_midpoint_to_min();
-                }
-                _ => {}
-            }
-        }
-
-        let len = other_len + 1;
-        let mut inner = SmallVec::with_capacity(len);
-        inner.extend_from_slice(other_inner);
-        inner[len - 2] = MIN;
-        inner.push(match policy {
-            FracindexPolicy::Random => DEFAULT,
-            FracindexPolicy::Sequential => MAX,
-        });
-        Self { inner }
-    }
-
-    /// Batch creates `count` indices that sort before `other`.
-    ///
-    /// The returned indices are sorted in ascending order.
-    pub fn batch_new_before(other: &Self, count: usize) -> Vec<Self> {
-        let mut result = Vec::with_capacity(count);
-        let mut tmp = Self::new_before(other);
-        for _ in 0..count {
-            let next_tmp = Self::new_before(&tmp);
-            result.push(tmp);
-            tmp = next_tmp;
-        }
-        result.reverse();
-        result
-    }
-
-    /// Creates an index that sorts strictly between bounds `a` and `b`.
-    ///
-    /// Returns [`Err`] when the bounds are reversed or do not admit a valid
-    /// fractional index between them.
-    ///
-    /// If `a == b`, returns `a`.
-    pub fn new_between(a: &Self, b: &Self) -> FracindexResult<Self> {
-        let a_len = a.inner.len();
-        let b_len = b.inner.len();
-        let min_len = a_len.min(b_len);
-
-        for i in 0..min_len {
-            // Handle a zero component in `b` separately to avoid underflow.
-            if b.inner[i] == MIN {
-                if a.inner[i] != MIN {
-                    let err = FracindexError::new(
-                        FracindexErrorKind::Invalid,
-                        "a MUST be before or equal to b to find a fractional index between them",
-                    )
-                    .with_context("a", format!("{a:?}"))
-                    .with_context("b", format!("{b:?}"));
-                    return Err(err);
-                }
-                continue;
-            }
-
-            // If the `i` part is not adjacent to `b`, find the midpoint
-            // directly.
-            if a.inner[i] < b.inner[i] - 1 {
-                let mut inner = SmallVec::from_slice(&a.inner[..=i]);
-                inner[i] = a.inner[i] + (b.inner[i] - a.inner[i]) / 2;
-                return Ok(Self { inner });
-            }
-
-            // If the `i` part is adjacent to `b`...
-            if a.inner[i] == b.inner[i] - 1 {
-                // A value with this prefix remains below `b`. Increase the
-                // first non-MAX suffix component in `a`, or append a component.
-                if let Some(ai) = (i + 1..a_len).find(|&ai| a.inner[ai] != MAX) {
-                    let value = a.inner[ai];
-                    let distance = MAX - value;
-                    let mut inner = SmallVec::from_slice(&a.inner[..=ai]);
-                    inner[ai] = value + distance / 2 + distance % 2;
-                    return Ok(Self { inner });
-                }
-
-                let mut inner = SmallVec::with_capacity(a_len + 1);
-                inner.extend_from_slice(&a.inner);
-                inner.push(DEFAULT);
-                return Ok(Self { inner });
-            }
-
-            if a.inner[i] > b.inner[i] {
-                let err = FracindexError::new(
-                    FracindexErrorKind::Invalid,
-                    "a MUST be before or equal to b to find a fractional index between them",
-                )
-                .with_context("a", format!("{a:?}"))
-                .with_context("b", format!("{b:?}"));
-                return Err(err);
-            }
-        }
-
-        // A longer `a` with the same prefix is ordered after `b`.
-        if a_len != min_len {
-            let err = FracindexError::new(
-                FracindexErrorKind::Invalid,
-                "a MUST be before or equal to b to find a fractional index between them",
-            )
-            .with_context("a", format!("{a:?}"))
-            .with_context("b", format!("{b:?}"));
-            return Err(err);
-        }
-
-        // Return the `a`'s clone if `a == b`
-        if b_len == min_len {
-            return Ok(a.clone());
-        }
-
-        // `a` is a strict prefix of `b`. Move the final component of `b`
-        // towards MIN; if that would become zero, extend the index instead.
-        let mut inner = SmallVec::with_capacity(b_len + 1);
-        inner.extend_from_slice(&b.inner);
-        if inner[b_len - 1] >= 2 {
-            inner[b_len - 1] /= 2;
-        } else {
-            inner[b_len - 1] = MIN;
-            inner.push(DEFAULT);
-        }
-        Ok(Self { inner })
-    }
-
-    /// Batch creates `count` indices that sort between `a` and `b`.
-    ///
-    /// The returned indices are sorted in ascending order.
-    pub fn batch_new_between(a: &Self, b: &Self, count: usize) -> FracindexResult<Vec<Self>> {
-        fn inner(
-            sink: &mut Vec<Fracindex>,
-            a: &Fracindex,
-            b: &Fracindex,
-            start: usize,
-            end: usize,
-        ) -> FracindexResult<()> {
-            if start >= end {
-                return Ok(());
-            }
-            if end - start == 1 {
-                sink[start] = Fracindex::new_between(a, b)?;
-                return Ok(());
-            }
-
-            let mid = (start + end) / 2;
-            let mid_val = Fracindex::new_between(a, b)?;
-            inner(sink, a, &mid_val, start, mid)?;
-            inner(sink, &mid_val, b, mid + 1, end)?;
-            sink[mid] = mid_val;
-
-            Ok(())
-        }
-
-        let mut result = vec![Fracindex::default(); count];
-        inner(&mut result, a, b, 0, count)?;
-        Ok(result)
-    }
-
     /// Encodes this index as canonical big-endian bytes.
     ///
     /// Trailing zero bytes are omitted. Comparing the returned byte vectors
@@ -518,7 +254,7 @@ impl Fracindex {
     /// The slice MUST be sorted in ascending order. If the slice is not sorted,
     /// the result is undefined. We do not check it.
     pub fn rebalance(slice: &[Self], policy: RebalancePolicy) -> FracindexResult<Cow<'_, [Self]>> {
-        Self::rebalance_with_policy(slice, policy, FracindexPolicy::default())
+        Self::rebalance_with_policy(slice, policy, SpacePolicy::default())
     }
 
     /// Rebalances the fracindexes slice.
@@ -528,7 +264,7 @@ impl Fracindex {
     pub fn rebalance_with_policy(
         slice: &[Self],
         rp: RebalancePolicy,
-        fp: FracindexPolicy,
+        fp: SpacePolicy,
     ) -> FracindexResult<Cow<'_, [Self]>> {
         fn rebalance_in_range(
             sink: &mut [Fracindex],
@@ -541,12 +277,12 @@ impl Fracindex {
                 return Ok(());
             }
             if end - start == 1 {
-                sink[start] = Fracindex::new_between(first, last)?;
+                sink[start] = Fracindex::builder().between(first, last).build()?;
                 return Ok(());
             }
 
             let mid = (start + end) / 2;
-            let mid_val = Fracindex::new_between(first, last)?;
+            let mid_val = Fracindex::builder().between(first, last).build()?;
             sink[mid] = mid_val.clone();
             rebalance_in_range(sink, start, mid, first, &mid_val)?;
             rebalance_in_range(sink, mid + 1, end, &mid_val, last)?;
@@ -564,12 +300,18 @@ impl Fracindex {
                 return Ok(());
             }
             if end - start == 1 {
-                sink[start] = Fracindex::new_after_with_policy(first, FracindexPolicy::Random);
+                sink[start] = Fracindex::builder()
+                    .after(first)
+                    .space_policy(SpacePolicy::Random)
+                    .build()?;
                 return Ok(());
             }
 
             let mid = (start + end) / 2;
-            let mid_val = Fracindex::new_after_with_policy(first, FracindexPolicy::Random);
+            let mid_val = Fracindex::builder()
+                .after(first)
+                .space_policy(SpacePolicy::Random)
+                .build()?;
             sink[mid] = mid_val.clone();
             rebalance_in_range(sink, start, mid, first, &mid_val)?;
             rebalance_after_part_random(sink, mid + 1, end, &mid_val)?;
@@ -587,12 +329,18 @@ impl Fracindex {
                 return Ok(());
             }
             if end - start == 1 {
-                sink[start] = Fracindex::new_before_with_policy(last, FracindexPolicy::Random);
+                sink[start] = Fracindex::builder()
+                    .before(last)
+                    .space_policy(SpacePolicy::Random)
+                    .build()?;
                 return Ok(());
             }
 
             let mid = (start + end) / 2;
-            let mid_val = Fracindex::new_before_with_policy(last, FracindexPolicy::Random);
+            let mid_val = Fracindex::builder()
+                .before(last)
+                .space_policy(SpacePolicy::Random)
+                .build()?;
             sink[mid] = mid_val.clone();
             rebalance_in_range(sink, mid + 1, end, &mid_val, last)?;
             rebalance_before_part_random(sink, start, mid, &mid_val)?;
@@ -634,12 +382,15 @@ impl Fracindex {
                 result[0] = slice[0].clone();
 
                 match fp {
-                    FracindexPolicy::Sequential => {
+                    SpacePolicy::Sequential => {
                         for i in 1..len {
-                            result[i] = Fracindex::new_after_with_policy(&result[i - 1], fp);
+                            result[i] = Fracindex::builder()
+                                .after(&result[i - 1])
+                                .space_policy(fp)
+                                .build()?;
                         }
                     }
-                    FracindexPolicy::Random => {
+                    SpacePolicy::Random => {
                         rebalance_after_part_random(&mut result, 1, len, &slice[0])?;
                     }
                 }
@@ -650,13 +401,16 @@ impl Fracindex {
                 result[len - 1] = slice[len - 1].clone();
 
                 match fp {
-                    FracindexPolicy::Sequential => {
+                    SpacePolicy::Sequential => {
                         for i in 1..len {
                             let j = len - 1 - i;
-                            result[j] = Fracindex::new_before_with_policy(&result[j + 1], fp);
+                            result[j] = Fracindex::builder()
+                                .before(&result[j + 1])
+                                .space_policy(fp)
+                                .build()?;
                         }
                     }
-                    FracindexPolicy::Random => {
+                    SpacePolicy::Random => {
                         rebalance_before_part_random(&mut result, 0, len - 1, &slice[len - 1])?;
                     }
                 }
@@ -668,17 +422,23 @@ impl Fracindex {
                 result[mid] = Fracindex::default();
 
                 match fp {
-                    FracindexPolicy::Sequential => {
+                    SpacePolicy::Sequential => {
                         for i in 0..mid {
                             let j = mid - 1 - i;
-                            result[j] = Fracindex::new_before_with_policy(&result[j + 1], fp);
+                            result[j] = Fracindex::builder()
+                                .before(&result[j + 1])
+                                .space_policy(fp)
+                                .build()?;
                         }
                         for i in 0..len - mid - 1 {
                             let j = mid + 1 + i;
-                            result[j] = Fracindex::new_after_with_policy(&result[j - 1], fp);
+                            result[j] = Fracindex::builder()
+                                .after(&result[j - 1])
+                                .space_policy(fp)
+                                .build()?;
                         }
                     }
-                    FracindexPolicy::Random => {
+                    SpacePolicy::Random => {
                         rebalance_before_part_random(&mut result, 0, mid, &Fracindex::default())?;
                         rebalance_after_part_random(
                             &mut result,
@@ -885,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_after_random() {
+    fn test_builder_after_random() {
         let test_cases: &[(&[u32], &[u32])] = &[
             (&[DEFAULT], &[3_221_225_471]),
             (&[MIN, GAP], &[2_147_483_648]),
@@ -897,14 +657,18 @@ mod tests {
 
         for (input, expected) in test_cases {
             let current = fracindex(input);
-            let next = Fracindex::new_after_with_policy(&current, FracindexPolicy::Random);
+            let next = Fracindex::builder()
+                .after(&current)
+                .space_policy(SpacePolicy::Random)
+                .build()
+                .unwrap();
             assert_words(&next, expected);
             assert!(next > current, "input: {input:?}");
         }
     }
 
     #[test]
-    fn test_new_after_sequential() {
+    fn test_builder_after_sequential() {
         let test_cases: &[(&[u32], &[u32])] = &[
             (&[DEFAULT], &[DEFAULT + GAP]),
             (&[MAX - GAP * 2], &[MAX - GAP]),
@@ -919,14 +683,14 @@ mod tests {
 
         for (input, expected) in test_cases {
             let current = fracindex(input);
-            let next = Fracindex::new_after(&current);
+            let next = Fracindex::builder().after(&current).build().unwrap();
             assert_words(&next, expected);
             assert!(next > current, "input: {input:?}");
         }
     }
 
     #[test]
-    fn test_new_before_random() {
+    fn test_builder_before_random() {
         let test_cases: &[(&[u32], &[u32])] = &[
             (&[DEFAULT], &[DEFAULT / 2]),
             (&[2], &[1]),
@@ -938,14 +702,18 @@ mod tests {
 
         for (input, expected) in test_cases {
             let current = fracindex(input);
-            let previous = Fracindex::new_before_with_policy(&current, FracindexPolicy::Random);
+            let previous = Fracindex::builder()
+                .before(&current)
+                .space_policy(SpacePolicy::Random)
+                .build()
+                .unwrap();
             assert_words(&previous, expected);
             assert!(previous < current, "input: {input:?}");
         }
     }
 
     #[test]
-    fn test_new_before_sequential() {
+    fn test_builder_before_sequential() {
         let test_cases: &[(&[u32], &[u32])] = &[
             (&[DEFAULT], &[DEFAULT - GAP]),
             (&[GAP * 2], &[GAP]),
@@ -964,14 +732,14 @@ mod tests {
 
         for (input, expected) in test_cases {
             let current = fracindex(input);
-            let previous = Fracindex::new_before(&current);
+            let previous = Fracindex::builder().before(&current).build().unwrap();
             assert_words(&previous, expected);
             assert!(previous < current, "input: {input:?}");
         }
     }
 
     #[test]
-    fn test_new_between() {
+    fn test_builder_between() {
         struct TestCase {
             a: &'static [u32],
             b: &'static [u32],
@@ -1014,7 +782,7 @@ mod tests {
         for (i, test_case) in test_cases.iter().enumerate() {
             let a = fracindex(test_case.a);
             let b = fracindex(test_case.b);
-            let result = Fracindex::new_between(&a, &b);
+            let result = Fracindex::builder().between(&a, &b).build();
 
             match (result, test_case.expected) {
                 (Ok(result), Some(expected)) => {
@@ -1030,17 +798,92 @@ mod tests {
     }
 
     #[test]
-    fn test_repeated_new_between_stays_strictly_ordered() {
+    fn test_repeated_builder_between_stays_strictly_ordered() {
         let left = Fracindex::default();
-        let mut right = Fracindex::new_after(&left);
+        let mut right = Fracindex::builder().after(&left).build().unwrap();
 
         for iteration in 0..64 {
-            let next = Fracindex::new_between(&left, &right)
+            let next = Fracindex::builder()
+                .between(&left, &right)
+                .build()
                 .expect("ordered bounds must always have a midpoint");
             assert!(left < next, "iteration {iteration}");
             assert!(next < right, "iteration {iteration}");
             right = next;
         }
+    }
+
+    #[test]
+    fn test_builder_builds_with_each_bound_configuration() {
+        let first = Fracindex::default();
+        let last = Fracindex::builder().after(&first).build().unwrap();
+
+        assert_eq!(Fracindex::builder().build().unwrap(), first);
+
+        let after = Fracindex::builder().after(&first).build().unwrap();
+        assert!(first < after);
+
+        let before = Fracindex::builder().before(&last).build().unwrap();
+        assert!(before < last);
+
+        let between = Fracindex::builder().between(&first, &last).build().unwrap();
+        let chained = Fracindex::builder()
+            .after(&first)
+            .before(&last)
+            .build()
+            .unwrap();
+        assert_eq!(between, chained);
+        assert!(first < chained && chained < last);
+    }
+
+    #[test]
+    fn test_builder_uses_random_space_policy() {
+        let current = Fracindex::default();
+
+        let after = Fracindex::builder()
+            .after(&current)
+            .space_policy(SpacePolicy::Random)
+            .build()
+            .unwrap();
+        let before = Fracindex::builder()
+            .before(&current)
+            .space_policy(SpacePolicy::Random)
+            .build()
+            .unwrap();
+
+        assert_words(&after, &[3_221_225_471]);
+        assert_words(&before, &[DEFAULT / 2]);
+    }
+
+    #[test]
+    fn test_builder_batch_after_before_and_no_bounds() {
+        let current = Fracindex::default();
+
+        let after = Fracindex::builder().after(&current).batch_build(3).unwrap();
+        assert_eq!(after.len(), 3);
+        assert!(current < after[0]);
+        assert_eq!(after[0], Fracindex::from_hex("8000 00ff").unwrap());
+        assert_eq!(after[2], Fracindex::from_hex("8000 02ff").unwrap());
+        assert!(after.windows(2).all(|pair| pair[0] < pair[1]));
+
+        let before = Fracindex::builder()
+            .before(&current)
+            .batch_build(3)
+            .unwrap();
+        assert_eq!(before.len(), 3);
+        assert!(before[2] < current);
+        assert_eq!(before[0], Fracindex::from_hex("7fff fcff").unwrap());
+        assert_eq!(before[2], Fracindex::from_hex("7fff feff").unwrap());
+        assert!(before.windows(2).all(|pair| pair[0] < pair[1]));
+
+        let unbounded = Fracindex::builder().batch_build(5).unwrap();
+        assert_eq!(unbounded.len(), 5);
+        assert_eq!(unbounded[0], Fracindex::from_hex("7fff fdff").unwrap());
+        assert_eq!(unbounded[2], Fracindex::default());
+        assert_eq!(unbounded[4], Fracindex::from_hex("8000 01ff").unwrap());
+        assert!(unbounded.windows(2).all(|pair| pair[0] < pair[1]));
+
+        assert!(Fracindex::builder().batch_build(0).unwrap().is_empty());
     }
 
     fn insert_index(
@@ -1078,7 +921,9 @@ mod tests {
                 .unwrap();
             (anchor.as_ref(), right.as_ref())
         };
-        let index = Fracindex::new_between(left, right)
+        let index = Fracindex::builder()
+            .between(left, right)
+            .build()
             .expect("iteration {iteration}, no index between adjacent orders");
         assert!(
             left < &index && &index < right,
@@ -1087,7 +932,7 @@ mod tests {
         index
     }
 
-    fn assert_random_insertions_stay_strictly_ordered(policy: impl Fn() -> FracindexPolicy) {
+    fn assert_random_insertions_stay_strictly_ordered(policy: impl Fn() -> SpacePolicy) {
         let mut rng = rand::rng();
 
         let mut ordered_indexes = BTreeSet::new();
@@ -1097,7 +942,12 @@ mod tests {
             ordered_indexes.insert(Rc::clone(&to_insert_index));
             random_indexes.push(Rc::clone(&to_insert_index));
 
-            to_insert_index = Rc::new(Fracindex::new_after(&to_insert_index))
+            to_insert_index = Rc::new(
+                Fracindex::builder()
+                    .after(&to_insert_index)
+                    .build()
+                    .unwrap(),
+            )
         }
 
         for iteration in 0..10_000 {
@@ -1105,7 +955,11 @@ mod tests {
             match rand_choice {
                 i if i <= 5 => {
                     let first = ordered_indexes.first().unwrap();
-                    let index = Fracindex::new_before_with_policy(first.as_ref(), policy());
+                    let index = Fracindex::builder()
+                        .before(first.as_ref())
+                        .space_policy(policy())
+                        .build()
+                        .unwrap();
                     assert!(
                         &index < first.as_ref(),
                         "iteration {iteration}, before insertion"
@@ -1120,7 +974,11 @@ mod tests {
                 }
                 i if i > 5 && i <= 10 => {
                     let last = ordered_indexes.last().unwrap();
-                    let index = Fracindex::new_after_with_policy(last.as_ref(), policy());
+                    let index = Fracindex::builder()
+                        .after(last.as_ref())
+                        .space_policy(policy())
+                        .build()
+                        .unwrap();
                     assert!(
                         last.as_ref() < &index,
                         "iteration {iteration}, after insertion"
@@ -1185,14 +1043,14 @@ mod tests {
     #[test]
     fn test_random_policy_insertions_stay_strictly_ordered() {
         for _i in 1..10 {
-            assert_random_insertions_stay_strictly_ordered(|| FracindexPolicy::Random);
+            assert_random_insertions_stay_strictly_ordered(|| SpacePolicy::Random);
         }
     }
 
     #[test]
     fn test_sequential_policy_insertions_stay_strictly_ordered() {
         for _i in 1..10 {
-            assert_random_insertions_stay_strictly_ordered(|| FracindexPolicy::Sequential);
+            assert_random_insertions_stay_strictly_ordered(|| SpacePolicy::Sequential);
         }
     }
 
@@ -1216,10 +1074,10 @@ mod tests {
         source_btree.insert(first.clone());
 
         // Very bad case: Construct an interval with very high density.
-        let mut tmp = Fracindex::new_after(&first);
+        let mut tmp = Fracindex::builder().after(&first).build().unwrap();
         for _ in 0..1023 {
             source_btree.insert(tmp.clone());
-            tmp = Fracindex::new_between(&first, &tmp).unwrap();
+            tmp = Fracindex::builder().between(&first, &tmp).build().unwrap();
         }
 
         // Some Fracindex object needs many bytes to encode...
@@ -1232,7 +1090,7 @@ mod tests {
             .unwrap()
             .into_owned();
         let first = Fracindex::default();
-        let last = Fracindex::new_after(&first);
+        let last = Fracindex::builder().after(&first).build().unwrap();
         assert_eq!(result.len(), 1024);
         assert_eq!(result.first(), Some(&first));
         assert_eq!(result.last(), Some(&last));
@@ -1355,11 +1213,11 @@ mod tests {
             );
         }
 
-        // We can also use the different FracindexPolicy.
+        // We can also use the different SpacePolicy.
         let result = Fracindex::rebalance_with_policy(
             source.as_slice(),
             RebalancePolicy::PreserveFirst,
-            FracindexPolicy::Random,
+            SpacePolicy::Random,
         )
         .unwrap();
         let max_bytes_len = result.iter().map(|i| i.bytes_len()).max().unwrap();
@@ -1388,7 +1246,7 @@ mod tests {
         let result = Fracindex::rebalance_with_policy(
             source.as_slice(),
             RebalancePolicy::PreserveLast,
-            FracindexPolicy::Random,
+            SpacePolicy::Random,
         )
         .unwrap();
         let max_bytes_len = result.iter().map(|i| i.bytes_len()).max().unwrap();
@@ -1416,10 +1274,13 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_new_between() {
+    fn test_builder_batch_between() {
         let a = Fracindex::default();
-        let b = Fracindex::new_after(&a);
-        let result = Fracindex::batch_new_between(&a, &b, 10).unwrap();
+        let b = Fracindex::builder().after(&a).build().unwrap();
+        let result = Fracindex::builder()
+            .between(&a, &b)
+            .batch_build(10)
+            .unwrap();
         assert_eq!(result.len(), 10);
         for i in 1..10 {
             assert!(result[i - 1] < result[i]);

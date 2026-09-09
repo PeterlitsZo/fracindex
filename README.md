@@ -23,8 +23,8 @@ You can create a new `Fracindex` and calculate a new `Fracindex` using existing
 use fracindex::Fracindex;
 
 let first = Fracindex::default();
-let second = Fracindex::new_after(&first);
-let middle = Fracindex::new_between(&first, &second).unwrap();
+let second = Fracindex::builder().after(&first).build().unwrap();
+let middle = Fracindex::builder().between(&first, &second).build().unwrap();
 
 println!("{first:?} {middle:?} {second:?}");
 // -> Fracindex(7fffffff) Fracindex(8000007f) Fracindex(800000ff)
@@ -35,16 +35,22 @@ assert!(middle < second);
 
 We have many methods:
 
-- `new_after`. Create a `Fracindex` that is after a given `Fracindex`.
-- `new_before`. Create a `Fracindex` that is before a given `Fracindex`.
-- `new_between`. Create a `Fracindex` that is between two given `Fracindex`
-  values.
-- `batch_new_after`. Create a batch of `Fracindex` values that are after a
-  given `Fracindex`.
-- `batch_new_before`. Create a batch of `Fracindex` values that are before a
-  given `Fracindex`.
-- `batch_new_between`. Create a batch of `Fracindex` values that are between
+- `builder().after(...).build()`. Create a `Fracindex` that is after a given
+  `Fracindex`.
+- `builder().before(...).build()`. Create a `Fracindex` that is before a given
+  `Fracindex`.
+- `builder().between(..., ...).build()`. Create a `Fracindex` that is between
   two given `Fracindex` values.
+- `builder().after(...).batch_build(count)`. Create a batch of `Fracindex`
+  values that are after a given `Fracindex`.
+- `builder().before(...).batch_build(count)`. Create a batch of `Fracindex`
+  values that are before a given `Fracindex`.
+- `builder().between(..., ...).batch_build(count)`. Create a batch of
+  `Fracindex` values that are between two given `Fracindex` values.
+
+Use `.space_policy(SpacePolicy::Random)` on a builder to allocate midpoint-like
+space near open bounds. The default is `SpacePolicy::Sequential`, which is
+suitable for repeated appends and prepends.
 
 The `Fracindex` can be turned into bytes and back again using
 `Fracindex::from_bytes` and `Fracindex::to_bytes`:
@@ -66,11 +72,14 @@ When that happens, you can rebalance a sorted slice:
 use fracindex::{Fracindex, RebalancePolicy};
 
 let first = Fracindex::default();
-let last = Fracindex::new_after(&first);
+let last = Fracindex::builder().after(&first).build().unwrap();
 let mut indexes = vec![first.clone(), last.clone()];
 
 for _ in 0..10 {
-    let next = Fracindex::new_between(&indexes[0], &indexes[1]).unwrap();
+    let next = Fracindex::builder()
+        .between(&indexes[0], &indexes[1])
+        .build()
+        .unwrap();
     indexes.insert(1, next);
 }
 println!("{indexes:#?}");
@@ -137,19 +146,19 @@ cargo bench --bench comparison
 
 On my macOS, the mean point estimates from Criterion are:
 
-| Benchmark            | `fracindex` | `fractional_index` | Speedup |
-| -------------------- | ----------: | -----------------: | ------: |
-| default              | 1.19 ns     | 8.78 ns            | 7.4x    |
-| new_before/short     | 4.22 ns     | 22.85 ns           | 5.4x    |
-| new_before/16_bytes  | 5.88 ns     | 37.56 ns           | 6.4x    |
-| new_before/64_bytes  | 18.08 ns    | 54.32 ns           | 3.0x    |
-| new_after/short      | 4.08 ns     | 23.24 ns           | 5.7x    |
-| new_after/16_bytes   | 5.45 ns     | 37.36 ns           | 6.9x    |
-| new_after/64_bytes   | 17.88 ns    | 54.43 ns           | 3.0x    |
-| new_between/short    | 5.76 ns     | 22.05 ns           | 3.8x    |
-| new_between/16_bytes | 18.68 ns    | 29.65 ns           | 1.6x    |
-| new_between/64_bytes | 18.81 ns    | 47.58 ns           | 2.5x    |
-| append/100000        | 769.44 us   | 19.15 ms           | 24.9x   |
-| prepend/100000       | 757.99 us   | 18.12 ms           | 23.9x   |
-| dense_between/100000 | 8.68 ms     | 17.53 ms           | 2.0x    |
-| random_insert/100000 | 1.17 ms     | 6.39 ms            | 5.5x    |
+| Benchmark                | `fracindex` | `fractional_index` | Speedup |
+| ------------------------ | ----------: | -----------------: | ------: |
+| default                  | 1.19 ns     | 8.78 ns            | 7.4x    |
+| builder_before/short     | 4.22 ns     | 22.85 ns           | 5.4x    |
+| builder_before/16_bytes  | 5.88 ns     | 37.56 ns           | 6.4x    |
+| builder_before/64_bytes  | 18.08 ns    | 54.32 ns           | 3.0x    |
+| builder_after/short      | 4.08 ns     | 23.24 ns           | 5.7x    |
+| builder_after/16_bytes   | 5.45 ns     | 37.36 ns           | 6.9x    |
+| builder_after/64_bytes   | 17.88 ns    | 54.43 ns           | 3.0x    |
+| builder_between/short    | 5.76 ns     | 22.05 ns           | 3.8x    |
+| builder_between/16_bytes | 18.68 ns    | 29.65 ns           | 1.6x    |
+| builder_between/64_bytes | 18.81 ns    | 47.58 ns           | 2.5x    |
+| append/100000            | 769.44 us   | 19.15 ms           | 24.9x   |
+| prepend/100000           | 757.99 us   | 18.12 ms           | 23.9x   |
+| dense_between/100000     | 8.68 ms     | 17.53 ms           | 2.0x    |
+| random_insert/100000     | 1.17 ms     | 6.39 ms            | 5.5x    |
