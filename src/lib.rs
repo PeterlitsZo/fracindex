@@ -644,6 +644,17 @@ mod tests {
         assert_eq!(actual.to_bytes(), bytes(expected));
     }
 
+    #[cfg(feature = "jitter")]
+    #[track_caller]
+    fn assert_has_jitter_tail(actual: &Fracindex, base: &Fracindex) {
+        assert!(actual.inner.starts_with(&base.inner));
+        assert!(
+            actual.inner.len() > base.inner.len(),
+            "expected {actual:?} to have a jitter tail after {base:?}"
+        );
+        assert_ne!(actual.inner.last(), Some(&MIN));
+    }
+
     #[test]
     fn test_builder_after_random() {
         let test_cases: &[(&[u32], &[u32])] = &[
@@ -853,6 +864,213 @@ mod tests {
 
         assert_words(&after, &[3_221_225_471]);
         assert_words(&before, &[DEFAULT / 2]);
+    }
+
+    #[cfg(feature = "jitter")]
+    #[test]
+    fn test_builder_jitter_build_with_rng_is_reproducible() {
+        use rand::SeedableRng;
+
+        let current = Fracindex::default();
+        let mut first_rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut second_rng = rand::rngs::StdRng::seed_from_u64(42);
+
+        let first = Fracindex::builder()
+            .after(&current)
+            .jitter()
+            .build_with_rng(&mut first_rng)
+            .unwrap();
+        let second = Fracindex::builder()
+            .after(&current)
+            .jitter()
+            .build_with_rng(&mut second_rng)
+            .unwrap();
+
+        assert_eq!(first, second);
+        assert!(current < first);
+        let base = Fracindex::builder().after(&current).build().unwrap();
+        assert_has_jitter_tail(&first, &base);
+        assert_eq!(
+            Fracindex::from_bytes(&first.to_bytes()).unwrap(),
+            first,
+            "jittered indexes must be canonical"
+        );
+    }
+
+    #[cfg(feature = "jitter")]
+    #[test]
+    fn test_builder_jitter_after_before_and_equal_bounds() {
+        use rand::SeedableRng;
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(43);
+        let after_cases = [
+            fracindex(&[DEFAULT]),
+            fracindex(&[MAX]),
+            fracindex(&[MAX, MAX]),
+        ];
+        for current in after_cases {
+            let base = Fracindex::builder().after(&current).build().unwrap();
+            let next = Fracindex::builder()
+                .after(&current)
+                .jitter()
+                .build_with_rng(&mut rng)
+                .unwrap();
+            assert!(current < next);
+            assert_has_jitter_tail(&next, &base);
+            assert_eq!(Fracindex::from_bytes(&next.to_bytes()).unwrap(), next);
+        }
+
+        let before_cases = [fracindex(&[DEFAULT]), fracindex(&[1]), fracindex(&[MIN, 1])];
+        for current in before_cases {
+            let base = Fracindex::builder().before(&current).build().unwrap();
+            let previous = Fracindex::builder()
+                .before(&current)
+                .jitter()
+                .build_with_rng(&mut rng)
+                .unwrap();
+            assert!(previous < current);
+            assert_has_jitter_tail(&previous, &base);
+            assert_eq!(
+                Fracindex::from_bytes(&previous.to_bytes()).unwrap(),
+                previous
+            );
+        }
+
+        let default = Fracindex::builder()
+            .jitter()
+            .build_with_rng(&mut rng)
+            .unwrap();
+        assert_eq!(default, Fracindex::default());
+
+        let current = fracindex(&[MIN, DEFAULT]);
+        let equal = Fracindex::builder()
+            .between(&current, &current)
+            .jitter()
+            .build_with_rng(&mut rng)
+            .unwrap();
+        assert_eq!(equal, current);
+    }
+
+    #[cfg(feature = "jitter")]
+    #[test]
+    fn test_builder_jitter_between_stays_in_range() {
+        use rand::SeedableRng;
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(44);
+        let test_cases: &[(&[u32], &[u32])] = &[
+            (&[62], &[64]),
+            (&[63], &[64]),
+            (&[63], &[64, MAX]),
+            (&[63], &[63, DEFAULT]),
+            (&[63], &[63, 1]),
+            (&[63], &[63, 2]),
+            (&[MIN, MIN, 1], &[MIN, MIN, 3]),
+            (&[1, MAX], &[2]),
+            (&[1, MAX, MAX], &[2]),
+            (&[1, MAX, MAX - 1], &[2]),
+            (&[DEFAULT], &[DEFAULT + GAP]),
+        ];
+
+        for &(left, right) in test_cases {
+            let left = fracindex(left);
+            let right = fracindex(right);
+            let base = Fracindex::builder().between(&left, &right).build().unwrap();
+
+            for _ in 0..32 {
+                let index = Fracindex::builder()
+                    .between(&left, &right)
+                    .jitter()
+                    .build_with_rng(&mut rng)
+                    .unwrap();
+                assert!(left < index, "left: {left:?}, got: {index:?}");
+                assert!(index < right, "right: {right:?}, got: {index:?}");
+                assert_has_jitter_tail(&index, &base);
+                assert_eq!(Fracindex::from_bytes(&index.to_bytes()).unwrap(), index);
+            }
+        }
+    }
+
+    #[cfg(feature = "jitter")]
+    #[test]
+    fn test_builder_jitter_between_rejects_reversed_bounds() {
+        use rand::SeedableRng;
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(45);
+        let left = fracindex(&[64]);
+        let right = fracindex(&[63]);
+        let result = Fracindex::builder()
+            .between(&left, &right)
+            .jitter()
+            .build_with_rng(&mut rng);
+
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "jitter")]
+    #[test]
+    fn test_builder_jitter_batch_builds_sorted_indexes() {
+        use rand::SeedableRng;
+
+        let first = Fracindex::default();
+        let last = Fracindex::builder().after(&first).build().unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(46);
+        let deterministic_after = Fracindex::builder().after(&first).batch_build(16).unwrap();
+        let deterministic_before = Fracindex::builder().before(&last).batch_build(16).unwrap();
+        let deterministic_between = Fracindex::builder()
+            .between(&first, &last)
+            .batch_build(16)
+            .unwrap();
+
+        let after = Fracindex::builder()
+            .after(&first)
+            .jitter()
+            .batch_build_with_rng(16, &mut rng)
+            .unwrap();
+        assert_eq!(after.len(), 16);
+        assert!(first < after[0]);
+        assert!(after.windows(2).all(|pair| pair[0] < pair[1]));
+        for (index, base) in after.iter().zip(&deterministic_after) {
+            assert_has_jitter_tail(index, base);
+        }
+
+        let before = Fracindex::builder()
+            .before(&last)
+            .jitter()
+            .batch_build_with_rng(16, &mut rng)
+            .unwrap();
+        assert_eq!(before.len(), 16);
+        assert!(before[15] < last);
+        assert!(before.windows(2).all(|pair| pair[0] < pair[1]));
+        for (index, base) in before.iter().zip(&deterministic_before) {
+            assert_has_jitter_tail(index, base);
+        }
+
+        let between = Fracindex::builder()
+            .between(&first, &last)
+            .jitter()
+            .batch_build_with_rng(16, &mut rng)
+            .unwrap();
+        assert_eq!(between.len(), 16);
+        assert!(first < between[0]);
+        assert!(between[15] < last);
+        assert!(between.windows(2).all(|pair| pair[0] < pair[1]));
+        for (index, base) in between.iter().zip(&deterministic_between) {
+            assert_has_jitter_tail(index, base);
+        }
+
+        let mut first_rng = rand::rngs::StdRng::seed_from_u64(47);
+        let mut second_rng = rand::rngs::StdRng::seed_from_u64(47);
+        let first_batch = Fracindex::builder()
+            .between(&first, &last)
+            .jitter()
+            .batch_build_with_rng(8, &mut first_rng)
+            .unwrap();
+        let second_batch = Fracindex::builder()
+            .between(&first, &last)
+            .jitter()
+            .batch_build_with_rng(8, &mut second_rng)
+            .unwrap();
+        assert_eq!(first_batch, second_batch);
     }
 
     #[test]

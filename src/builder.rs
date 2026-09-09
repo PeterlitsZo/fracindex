@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+#[cfg(feature = "jitter")]
+use rand::RngExt;
 use smallvec::SmallVec;
 
 use crate::{
@@ -35,6 +37,8 @@ pub struct FracindexBuilder<'a> {
     after: Option<&'a Fracindex>,
     before: Option<&'a Fracindex>,
     space_policy: SpacePolicy,
+    #[cfg(feature = "jitter")]
+    jitter: bool,
 }
 
 impl<'a> FracindexBuilder<'a> {
@@ -63,8 +67,29 @@ impl<'a> FracindexBuilder<'a> {
         self
     }
 
+    /// Appends a randomized tail to the generated index when it can be done
+    /// without crossing the configured upper bound.
+    ///
+    /// This method is available only with the `jitter` feature. Without bounds,
+    /// jitter has no effect and the builder produces the same values as usual.
+    #[cfg(feature = "jitter")]
+    pub fn jitter(mut self) -> Self {
+        self.jitter = true;
+        self
+    }
+
     /// Builds one fractional index using the configured bounds and policy.
     pub fn build(self) -> FracindexResult<Fracindex> {
+        #[cfg(feature = "jitter")]
+        if self.jitter {
+            let mut rng = rand::rng();
+            return self.build_with_rng(&mut rng);
+        }
+
+        self.build_deterministic()
+    }
+
+    fn build_deterministic(self) -> FracindexResult<Fracindex> {
         match (self.after, self.before) {
             (None, None) => Ok(Fracindex::default()),
             (Some(after), None) => Ok(after_with_policy(after, self.space_policy)),
@@ -73,10 +98,37 @@ impl<'a> FracindexBuilder<'a> {
         }
     }
 
+    /// Builds one fractional index using `rng` when jitter is enabled.
+    ///
+    /// This method is available only with the `jitter` feature.
+    #[cfg(feature = "jitter")]
+    pub fn build_with_rng<R: rand::Rng + ?Sized>(self, rng: &mut R) -> FracindexResult<Fracindex> {
+        if !self.jitter {
+            return self.build_deterministic();
+        }
+
+        let before = self.before;
+        let mut index = self.build_deterministic()?;
+        if self.after.is_some() || before.is_some() {
+            append_jitter_tail(&mut index, before, rng);
+        }
+        Ok(index)
+    }
+
     /// Builds `count` fractional indexes using the configured bounds and policy.
     ///
     /// The returned indexes are sorted in ascending order.
     pub fn batch_build(self, count: usize) -> FracindexResult<Vec<Fracindex>> {
+        #[cfg(feature = "jitter")]
+        if self.jitter {
+            let mut rng = rand::rng();
+            return self.batch_build_with_rng(count, &mut rng);
+        }
+
+        self.batch_build_deterministic(count)
+    }
+
+    fn batch_build_deterministic(self, count: usize) -> FracindexResult<Vec<Fracindex>> {
         match (self.after, self.before) {
             (None, None) => {
                 let placeholder = vec![Fracindex::default(); count];
@@ -91,6 +143,32 @@ impl<'a> FracindexBuilder<'a> {
             (None, Some(before)) => Ok(batch_before(before, count, self.space_policy)),
             (Some(after), Some(before)) => batch_between(after, before, count),
         }
+    }
+
+    /// Builds `count` fractional indexes using `rng` when jitter is enabled.
+    ///
+    /// This method is available only with the `jitter` feature. The returned
+    /// indexes are sorted in ascending order.
+    #[cfg(feature = "jitter")]
+    pub fn batch_build_with_rng<R: rand::Rng + ?Sized>(
+        self,
+        count: usize,
+        rng: &mut R,
+    ) -> FracindexResult<Vec<Fracindex>> {
+        if !self.jitter {
+            return self.batch_build_deterministic(count);
+        }
+
+        let has_bounds = self.after.is_some() || self.before.is_some();
+        let mut result = self.batch_build_deterministic(count)?;
+        if has_bounds {
+            let upper_bounds = result.clone();
+            for i in 0..result.len() {
+                let upper = upper_bounds.get(i + 1).or(self.before);
+                append_jitter_tail(&mut result[i], upper, rng);
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -258,6 +336,66 @@ fn between(a: &Fracindex, b: &Fracindex) -> FracindexResult<Fracindex> {
         inner.push(DEFAULT);
     }
     Ok(Fracindex { inner })
+}
+
+#[cfg(feature = "jitter")]
+fn random_non_zero<R: rand::Rng + ?Sized>(rng: &mut R) -> u32 {
+    rng.random_range(1..=MAX)
+}
+
+#[cfg(feature = "jitter")]
+fn append_jitter_tail(
+    index: &mut Fracindex,
+    upper: Option<&Fracindex>,
+    rng: &mut (impl rand::Rng + ?Sized),
+) {
+    match upper {
+        None => {
+            index.inner.push(random_non_zero(rng));
+        }
+        Some(upper) if &*index < upper => {
+            append_jitter_tail_below(index, upper, rng);
+        }
+        Some(_) => {}
+    }
+}
+
+#[cfg(feature = "jitter")]
+fn append_jitter_tail_below(
+    index: &mut Fracindex,
+    upper: &Fracindex,
+    rng: &mut (impl rand::Rng + ?Sized),
+) {
+    let min_len = index.inner.len().min(upper.inner.len());
+    for i in 0..min_len {
+        match index.inner[i].cmp(&upper.inner[i]) {
+            std::cmp::Ordering::Less => {
+                index.inner.push(random_non_zero(rng));
+                return;
+            }
+            std::cmp::Ordering::Greater => return,
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+
+    if index.inner.len() >= upper.inner.len() {
+        return;
+    }
+
+    for upper_word in &upper.inner[index.inner.len()..] {
+        index.inner.push(MIN);
+        if *upper_word != MIN {
+            let value = rng.random_range(MIN..*upper_word);
+            *index
+                .inner
+                .last_mut()
+                .expect("the candidate tail word was just pushed") = value;
+            if value == MIN {
+                index.inner.push(random_non_zero(rng));
+            }
+            return;
+        }
+    }
 }
 
 fn batch_between(a: &Fracindex, b: &Fracindex, count: usize) -> FracindexResult<Vec<Fracindex>> {

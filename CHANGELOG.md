@@ -8,6 +8,8 @@ Please follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Add key-value context to `FracindexError`.
 - Add `FracindexBuilder` with `build` and `batch_build` construction methods.
+- Add the optional `jitter` feature for appending randomized tails to builder
+  results.
 
 ### Changed
 

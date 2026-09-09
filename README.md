@@ -65,6 +65,49 @@ It is very helpful if you want to put it in a database or serialize it. You can
 use `bytes_len` to get the number of bytes required to store the `Fracindex`
 without allocating any memory.
 
+## Optional Jitter
+
+Enable the `jitter` feature when multiple writers may create indexes near the
+same bounds and you want a randomized tail after the usual deterministic index:
+
+```toml
+fracindex = { version = "0.3.1", features = ["jitter"] }
+rand = "0.10.2"
+```
+
+```rust
+use fracindex::Fracindex;
+use rand::SeedableRng;
+
+let first = Fracindex::default();
+let last = Fracindex::builder().after(&first).build().unwrap();
+let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+
+let index = Fracindex::builder()
+    .between(&first, &last)
+    .jitter()
+    .build_with_rng(&mut rng)
+    .unwrap();
+
+let base = Fracindex::builder()
+    .between(&first, &last)
+    .build()
+    .unwrap();
+
+assert!(first < index);
+assert!(index < last);
+assert!(index.to_bytes().starts_with(&base.to_bytes()));
+assert!(index.bytes_len() > base.bytes_len());
+
+println!("{first:?} {base:?} {index:?} {last:?}");
+// -> Fracindex(7fffffff) Fracindex(8000007f) Fracindex(8000007f222724a3) Fracindex(800000ff)
+```
+
+Use `build_with_rng` or `batch_build_with_rng` when you need to provide your own
+random number generator.
+
+## Rebalancing
+
 Sometimes repeated insertions into the same small range make indexes longer.
 When that happens, you can rebalance a sorted slice:
 
