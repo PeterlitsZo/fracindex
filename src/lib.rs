@@ -9,6 +9,7 @@
 
 use std::{
     borrow::Cow,
+    collections::BTreeMap,
     error::Error,
     fmt::{Debug, Display},
 };
@@ -43,13 +44,27 @@ pub enum RebalancePolicy {
 }
 
 pub struct FracindexError {
-    pub kind: FracindexErrorKind,
-    pub message: String,
+    kind: FracindexErrorKind,
+    context: BTreeMap<String, String>,
+    message: String,
 }
 
 impl Debug for FracindexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}: {}", self.kind, self.message)
+        write!(f, "{:?}: {}", self.kind, self.message)?;
+        if !self.context.is_empty() {
+            write!(f, " (")?;
+            let mut first = true;
+            for (key, value) in &self.context {
+                if !first {
+                    write!(f, ", ")?;
+                    first = false;
+                }
+                write!(f, "{}={}", key, value)?;
+            }
+            write!(f, ")")?;
+        }
+        Ok(())
     }
 }
 
@@ -72,12 +87,20 @@ impl FracindexError {
     {
         Self {
             kind,
+            context: BTreeMap::new(),
             message: message.to_string(),
         }
     }
 
+    /// Returns the error kind.
     pub fn kind(&self) -> FracindexErrorKind {
         self.kind
+    }
+
+    /// Adds a context key-value pair to the error.
+    pub fn with_context(mut self, key: impl Display, value: impl Display) -> Self {
+        self.context.insert(key.to_string(), value.to_string());
+        self
     }
 }
 
@@ -128,10 +151,9 @@ impl Fracindex {
     pub fn from_bytes(bytes: &[u8]) -> FracindexResult<Self> {
         if bytes.is_empty() {
             // Empty bytes cannot represent a valid fracindex.
-            return Err(FracindexError::new(
-                FracindexErrorKind::Invalid,
-                "bytes must not be empty",
-            ));
+            let err = FracindexError::new(FracindexErrorKind::Invalid, "bytes must not be empty")
+                .with_context("bytes", format!("{:?}", bytes));
+            return Err(err);
         }
 
         let inner_len = bytes.len().div_ceil(BYTES_CNT);
@@ -154,10 +176,13 @@ impl Fracindex {
 
         // Check if it is not empty.
         if inner.is_empty() {
-            return Err(FracindexError::new(
+            let err = FracindexError::new(
                 FracindexErrorKind::Invalid,
                 "decoded bytes must not be empty",
-            ));
+            )
+            .with_context("bytes", format!("{:?}", bytes))
+            .with_context("parsed", format!("{:?}", inner));
+            return Err(err);
         }
 
         Ok(Self { inner })
@@ -179,20 +204,27 @@ impl Fracindex {
     /// character (but space is allowed), or decodes to no non-zero component.
     pub fn from_hex(hex: &str) -> FracindexResult<Self> {
         if hex.is_empty() {
-            return Err(FracindexError::new(
+            let err = FracindexError::new(
                 FracindexErrorKind::Invalid,
-                "hex string must contain digits",
-            ));
+                "hex string MUST contain digits but now it is empty",
+            )
+            .with_context("hex", format!("{:?}", hex));
+            return Err(err);
         }
 
         let decode_nibble = |digit| match digit {
             b'0'..=b'9' => Ok(digit - b'0'),
             b'a'..=b'f' => Ok(digit - b'a' + 10),
             b'A'..=b'F' => Ok(digit - b'A' + 10),
-            _ => Err(FracindexError::new(
-                FracindexErrorKind::Invalid,
-                "hex string must contain only hexadecimal digits",
-            )),
+            digit => {
+                let err = FracindexError::new(
+                    FracindexErrorKind::Invalid,
+                    "hex string must contain only hexadecimal digits",
+                )
+                .with_context("hex", format!("{:?}", hex))
+                .with_context("digit", format!("{:?}", digit));
+                Err(err)
+            }
         };
 
         let mut bytes = Vec::with_capacity(
@@ -350,10 +382,12 @@ impl Fracindex {
         result
     }
 
-    /// Creates an index that sorts strictly between `a` and `b`.
+    /// Creates an index that sorts strictly between bounds `a` and `b`.
     ///
-    /// Returns [`Err`] when the bounds are equal, reversed, or do not admit a
-    /// valid fractional index between them.
+    /// Returns [`Err`] when the bounds are reversed or do not admit a valid
+    /// fractional index between them.
+    ///
+    /// If `a == b`, returns `a`.
     pub fn new_between(a: &Self, b: &Self) -> FracindexResult<Self> {
         let a_len = a.inner.len();
         let b_len = b.inner.len();
@@ -363,20 +397,26 @@ impl Fracindex {
             // Handle a zero component in `b` separately to avoid underflow.
             if b.inner[i] == MIN {
                 if a.inner[i] != MIN {
-                    return Err(FracindexError::new(
+                    let err = FracindexError::new(
                         FracindexErrorKind::Invalid,
-                        "a is not before b",
-                    ));
+                        "a MUST be before or equal to b to find a fractional index between them",
+                    )
+                    .with_context("a", format!("{a:?}"))
+                    .with_context("b", format!("{b:?}"));
+                    return Err(err);
                 }
                 continue;
             }
 
+            // If the `i` part is not adjacent to `b`, find the midpoint
+            // directly.
             if a.inner[i] < b.inner[i] - 1 {
                 let mut inner = SmallVec::from_slice(&a.inner[..=i]);
                 inner[i] = a.inner[i] + (b.inner[i] - a.inner[i]) / 2;
                 return Ok(Self { inner });
             }
 
+            // If the `i` part is adjacent to `b`...
             if a.inner[i] == b.inner[i] - 1 {
                 // A value with this prefix remains below `b`. Increase the
                 // first non-MAX suffix component in `a`, or append a component.
@@ -395,20 +435,30 @@ impl Fracindex {
             }
 
             if a.inner[i] > b.inner[i] {
-                return Err(FracindexError::new(
+                let err = FracindexError::new(
                     FracindexErrorKind::Invalid,
-                    "a is not before b",
-                ));
+                    "a MUST be before or equal to b to find a fractional index between them",
+                )
+                .with_context("a", format!("{a:?}"))
+                .with_context("b", format!("{b:?}"));
+                return Err(err);
             }
         }
 
-        // Equal values have no midpoint, and a longer `a` with the same prefix
-        // is ordered after `b`.
-        if a_len != min_len || b_len == min_len {
-            return Err(FracindexError::new(
+        // A longer `a` with the same prefix is ordered after `b`.
+        if a_len != min_len {
+            let err = FracindexError::new(
                 FracindexErrorKind::Invalid,
-                "a is not before b",
-            ));
+                "a MUST be before or equal to b to find a fractional index between them",
+            )
+            .with_context("a", format!("{a:?}"))
+            .with_context("b", format!("{b:?}"));
+            return Err(err);
+        }
+
+        // Return the `a`'s clone if `a == b`
+        if b_len == min_len {
+            return Ok(a.clone());
         }
 
         // `a` is a strict prefix of `b`. Move the final component of `b`
@@ -985,12 +1035,13 @@ mod tests {
             };
         }
         let test_cases = [
+            // Part I.
             test_case! { &[1], &[2] => Some(&[1, DEFAULT]) },
             test_case! { &[MIN, DEFAULT], &[DEFAULT] => Some(&[DEFAULT / 2]) },
             test_case! { &[62], &[64] => Some(&[63]) },
             test_case! { &[63], &[64] => Some(&[63, DEFAULT]) },
+            test_case! { &[63], &[64, MAX] => Some(&[63, DEFAULT]) },
             test_case! { &[63], &[63, DEFAULT] => Some(&[63, DEFAULT / 2]) },
-            test_case! { &[63], &[63] => None },
             test_case! { &[64], &[63] => None },
             test_case! { &[63], &[63, 1] => Some(&[63, MIN, DEFAULT]) },
             test_case! { &[63], &[63, 2] => Some(&[63, 1]) },
@@ -1001,6 +1052,11 @@ mod tests {
             test_case! { &[1, MAX, MAX], &[2] => Some(&[1, MAX, MAX, DEFAULT]) },
             test_case! { &[1, MAX, MAX - 1], &[2] => Some(&[1, MAX, MAX]) },
             test_case! { &[DEFAULT], &[DEFAULT + GAP] => Some(&[DEFAULT + GAP / 2]) },
+            // Part II.
+            test_case! { &[1], &[1] => Some(&[1]) },
+            test_case! { &[63], &[63] => Some(&[63]) },
+            test_case! { &[MIN, DEFAULT], &[MIN, DEFAULT] => Some(&[MIN, DEFAULT]) },
+            test_case! { &[MAX], &[MAX] => Some(&[MAX]) },
         ];
 
         for (i, test_case) in test_cases.iter().enumerate() {
@@ -1011,10 +1067,12 @@ mod tests {
             match (result, test_case.expected) {
                 (Ok(result), Some(expected)) => {
                     assert_words(&result, expected);
-                    assert!(a < result && result < b, "iteration {i}");
+                    assert!(a <= result && result <= b, "iteration {i}");
                 }
                 (Err(_), None) => {}
-                _ => panic!("unexpected result at iteration {i}"),
+                (result, expected) => {
+                    panic!("unexpected result at iteration {i}, want {expected:?}, got {result:?}")
+                }
             }
         }
     }

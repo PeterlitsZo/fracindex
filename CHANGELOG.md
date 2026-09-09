@@ -2,6 +2,18 @@
 
 Please follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+
+- Add key-value context to `FracindexError`.
+
+### Changed
+
+- [BREAKING] The `FracindexError` struct is now only having private fields.
+- [BREAKING] Change `Fracindex::new_between` to return the existing index when
+  both bounds are equal instead of failing.
+
 ## v0.3.1 (2026-08-17)
 
 ### Fixed
