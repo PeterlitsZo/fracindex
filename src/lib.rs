@@ -1,8 +1,11 @@
-//! Fractional indexes for assigning stable, sortable positions to ordered values.
+//! Fractional indexes for assigning stable, sortable positions to ordered
+//! values.
 //!
 //! A [`Fracindex`] can be generated before, after, or between existing indexes
-//! without renumbering the rest of the sequence. Its byte representation preserves
-//! the same ordering as the index itself.
+//! without renumbering the rest of the sequence. Its byte representation
+//! preserves the same ordering as the index itself.
+//!
+//! See [README](https://github.com/PeterlitsZo/fracindex) for more information.
 
 use std::{
     borrow::Cow,
