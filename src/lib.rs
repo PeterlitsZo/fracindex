@@ -34,15 +34,38 @@ pub enum FracindexPolicy {
     Sequential,
 }
 
+/// Controls which existing boundary indexes are preserved when rebalancing a
+/// sorted slice of [`Fracindex`] values.
+///
+/// Preserving boundaries keeps external references to those boundary positions
+/// stable, while replacing more values usually gives the rebalanced sequence
+/// more compact encodings.
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RebalancePolicy {
+    /// Keeps both the first and last indexes unchanged.
+    ///
+    /// All interior indexes are redistributed between the original boundaries.
     #[default]
     PreserveBoth,
+    /// Keeps only the first index unchanged.
+    ///
+    /// The remaining indexes are regenerated after the first index.
     PreserveFirst,
+    /// Keeps only the last index unchanged.
+    ///
+    /// The preceding indexes are regenerated before the last index.
     PreserveLast,
+    /// Replaces every index in the slice.
+    ///
+    /// The new sequence is centered around [`Fracindex::default`].
     ReplaceAll,
 }
 
+/// Error returned by fallible fractional-index operations.
+///
+/// The error carries a stable [`FracindexErrorKind`] plus a formatted diagnostic
+/// message. Additional context can be attached with
+/// [`FracindexError::with_context`].
 pub struct FracindexError {
     kind: FracindexErrorKind,
     context: BTreeMap<String, String>,
@@ -104,10 +127,13 @@ impl FracindexError {
     }
 }
 
+/// Convenient result type used by fallible `fracindex` APIs.
 pub type FracindexResult<T> = Result<T, FracindexError>;
 
+/// Machine-readable category for a [`FracindexError`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FracindexErrorKind {
+    /// The provided input or bounds are not valid for the requested operation.
     Invalid,
 }
 
